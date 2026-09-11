@@ -1,4 +1,8 @@
 /__pycache__/
 /fine_tuned_vietnamese_bi_encoder/
+/fine_tuned_vietnamese_cross_encoder/
 legal_corpus_resolved.json
 uit-legal-finetuned-model.zip
+*.pkl
+embedding_tsne_visualization.png
+/LegalIR*/
