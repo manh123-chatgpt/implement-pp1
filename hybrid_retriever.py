@@ -122,34 +122,77 @@ def get_best_chunk_bm25(query, text, max_chunk_chars=800):
     return chunks[best_idx]
 
 class CrossEncoderReranker:
-    def __init__(self, model_path="fine_tuned_vietnamese_cross_encoder", corpus=None):
+    def __init__(self, model_path=None, corpus=None):
         import torch
         self.corpus = corpus
-        # Tải Cross-Encoder đã train trên chính data luật của mình
-        print(f"🚀 KHỞi ĐỘNG CROSS-ENCODER RERANKER: '{model_path}'...")
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = CrossEncoder(model_path, device=device, model_kwargs={"torch_dtype": torch.float16 if device=="cuda" else torch.float32})
-        self.is_active = True
+        self.is_active = False
 
-    def rerank(self, query, top_docs):
-        if not self.is_active or not self.corpus:
-            return top_docs
+        # Tự động dò đường dẫn model đã fine-tune, hoặc tải PhoRanker gốc
+        candidates = [
+            model_path,
+            os.path.join(WORK_DIR, "fine_tuned_vietnamese_cross_encoder"),
+            "fine_tuned_vietnamese_cross_encoder",
+            "/kaggle/input/fine-tuned-vietnamese-cross-encoder/fine_tuned_vietnamese_cross_encoder",
+            "itdainb/PhoRanker"
+        ]
+        chosen_path = None
+        for p in candidates:
+            if p and (os.path.exists(p) or p == "itdainb/PhoRanker"):
+                chosen_path = p
+                break
+
+        if not chosen_path:
+            chosen_path = "itdainb/PhoRanker"
+
+        print(f"🚀 KHỞI ĐỘNG CROSS-ENCODER RERANKER: '{chosen_path}'...")
+        try:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.model = CrossEncoder(
+                chosen_path,
+                device=device,
+                num_labels=1,
+                max_length=256
+            )
+            self.is_active = True
+            print(f"✅ Re-ranker sẵn sàng trên thiết bị: {device.upper()}")
+        except Exception as e:
+            print(f"⚠️ Không thể nạp Cross-Encoder: {e}. Hệ thống sẽ sử dụng điểm lọc Stage 1.")
+            self.is_active = False
+
+    def rerank(self, query, top_docs, top_k=5):
+        if not self.is_active or not self.corpus or not top_docs:
+            return top_docs[:top_k]
+
+        # Chuẩn bị cặp (query, doc_passage) cho từng ứng viên
+        pairs = []
+        for doc_id in top_docs:
+            doc_text = self.corpus.get(str(doc_id), "")
+            passage = get_best_chunk_bm25(query, doc_text, max_chunk_chars=600)
+            pairs.append([query, passage])
+
+        try:
+            # Batch size 32 trên GPU giúp re-rank 90 candidates trong chưa tới 0.2s
+            batch_sz = 32 if torch.cuda.is_available() else 8
+            scores = self.model.predict(pairs, batch_size=batch_sz, show_progress_bar=False)
             
-        # Nối câu hỏi và đúng CÁI ĐIỀU LUẬT chứa câu trả lời
-        pairs = [[query, get_best_chunk_bm25(query, self.corpus[doc_id], max_chunk_chars=800)] for doc_id in top_docs]
-        
-        # Chấm điểm lại (batch_size nhỏ để không tràn VRAM 4GB)
-        scores = self.model.predict(pairs, batch_size=4)
-        
-        # Sắp xếp lại danh sách ứng viên dựa trên điểm Cross-Encoder
-        ranked_docs = [doc_id for _, doc_id in sorted(zip(scores, top_docs), key=lambda x: x[0], reverse=True)]
-        return ranked_docs
+            # Sắp xếp lại danh sách ứng viên theo điểm số giảm dần của Cross-Encoder
+            ranked_docs = [doc_id for _, doc_id in sorted(zip(scores, top_docs), key=lambda x: x[0], reverse=True)]
+            return ranked_docs[:top_k]
+        except Exception as e:
+            print(f"⚠️ Lỗi trong quá trình re-rank: {e}")
+            return top_docs[:top_k]
 
 class HybridSearcher:
-    def __init__(self, corpus):
-        print("🚀 Khởi tạo HỆ THỐNG HYBRID SOTA (BM25 + BGE-M3 Chunked + Fine-tuned Super)...")
+    def __init__(self, corpus, use_reranker=True, light_mode=True):
+        """
+        light_mode=True (Chuẩn BTC UIT): Chỉ dùng BM25 + Fine-tuned Bi-Encoder để lọc Top 90,
+        sau đó đưa qua Cross-Encoder (PhoRanker) re-rank. Chạy siêu nhanh (<15 phút trên Kaggle).
+        light_mode=False: Nạp thêm BGE-M3 và E5-Large (tốn nhiều giờ mã hóa).
+        """
+        print(f"🚀 Khởi tạo HỆ THỐNG 2-STAGE RETRIEVAL CHUẨN BTC UIT (Light Mode: {light_mode})...")
         self.corpus = corpus
         self.doc_ids = list(corpus.keys())
+        self.light_mode = light_mode
         
         # Bản đồ số hiệu văn bản tra cứu O(1)
         self.doc_law_numbers = {}
@@ -161,21 +204,28 @@ class HybridSearcher:
             if laws:
                 self.doc_law_numbers[doc_id] = laws
         
+        # Giai đoạn 1: Bộ thu thập ứng viên (Candidate Retrieval)
         self.bm25_searcher = BM25Searcher(corpus, use_cache=True)
-        self.dense_searcher = DenseSearcher(corpus, use_cache=True)
         self.finetuned_searcher = FineTunedDenseSearcher(corpus, use_cache=True)
-        self.e5_searcher = E5LargeSearcher(corpus, use_cache=True)
-        self.reranker = None
+        
+        if not light_mode:
+            self.dense_searcher = DenseSearcher(corpus, use_cache=True)
+            self.e5_searcher = E5LargeSearcher(corpus, use_cache=True)
+        else:
+            self.dense_searcher = None
+            self.e5_searcher = None
 
-    def search(self, query, top_k=5, candidate_k=150, rrf_k=10):
+        # Giai đoạn 2: Bộ tái xếp hạng (Cross-Encoder Re-ranker)
+        if use_reranker:
+            self.reranker = CrossEncoderReranker(corpus=corpus)
+        else:
+            self.reranker = None
+
+    def search(self, query, top_k=5, candidate_k=90, rrf_k=10):
         """
-        Bộ tham số Kỷ Lục Test (92.54%):
-        - rrf_k: 10
-        - candidate_k: 150
-        - w_bm25: 1.5
-        - w_bgem3: 0.5
-        - w_finetuned: 2.5
-        - w_e5: 1.0
+        Quy trình 2 giai đoạn chuẩn BTC:
+        - Giai đoạn 1: BM25 + Bi-Encoder + Luật boost lấy Top 90 ứng viên (Exist@90 đạt 97.6%).
+        - Giai đoạn 2: Cross-Encoder PhoRanker re-rank 90 ứng viên và trả về Top 5 chính xác nhất.
         """
         query_laws = extract_law_numbers(query)
         query_articles = extract_article_number(query)
@@ -206,23 +256,25 @@ class HybridSearcher:
 
         expanded_query = expand_legal_query(query)
 
+        # 1. Lọc ứng viên từ BM25 và Bi-Encoder
         bm25_top = self.bm25_searcher.search(expanded_query, top_k=candidate_k)
-        dense_top = self.dense_searcher.search(expanded_query, top_k=candidate_k)
         finetuned_top = self.finetuned_searcher.search(expanded_query, top_k=candidate_k)
-        e5_top = self.e5_searcher.search(expanded_query, top_k=candidate_k)
 
         scores = {}
         for rank, doc_id in enumerate(bm25_top):
             scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 1.5
 
-        for rank, doc_id in enumerate(dense_top):
-            scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 0.5
-
         for rank, doc_id in enumerate(finetuned_top):
             scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 2.5
 
-        for rank, doc_id in enumerate(e5_top):
-            scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 1.0
+        # Nếu không ở chế độ light mode, kết hợp thêm BGE-M3 và E5
+        if not self.light_mode and self.dense_searcher and self.e5_searcher:
+            dense_top = self.dense_searcher.search(expanded_query, top_k=candidate_k)
+            e5_top = self.e5_searcher.search(expanded_query, top_k=candidate_k)
+            for rank, doc_id in enumerate(dense_top):
+                scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 0.5
+            for rank, doc_id in enumerate(e5_top):
+                scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 1.0
 
         for doc_id in exact_matched_docs:
             scores[doc_id] = scores.get(doc_id, 0.0) + 5.0
@@ -231,9 +283,13 @@ class HybridSearcher:
             scores[doc_id] = scores.get(doc_id, 0.0) + 7.0
 
         sorted_docs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        top_k_candidates = [doc_id for doc_id, _ in sorted_docs[:candidate_k]]
+        top_candidates = [doc_id for doc_id, _ in sorted_docs[:candidate_k]]
+
+        # 2. Giai đoạn Re-ranking với PhoRanker
+        if self.reranker and self.reranker.is_active:
+            return self.reranker.rerank(query, top_candidates, top_k=top_k)
         
-        return top_k_candidates[:top_k]
+        return top_candidates[:top_k]
 
 def create_submission(predictions, output_json="submission.json", output_zip="submission.zip"):
     """

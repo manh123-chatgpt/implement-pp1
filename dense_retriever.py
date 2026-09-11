@@ -158,8 +158,9 @@ _model_candidates = [
     "/kaggle/input/datasets/thurdayafternoon/uit-legal-finetuned-model/fine_tuned_vietnamese_bi_encoder",
     "/kaggle/input/uit-legal-finetuned-model/fine_tuned_vietnamese_bi_encoder",
     "/kaggle/input/uit-legal-finetuned-model",
+    "bkai-foundation-models/vietnamese-bi-encoder"
 ]
-MODEL_FINETUNED_DIR = next((p for p in _model_candidates if _os.path.exists(p)), _model_candidates[0])
+MODEL_FINETUNED_DIR = next((p for p in _model_candidates if _os.path.exists(p) or p == "bkai-foundation-models/vietnamese-bi-encoder"), _model_candidates[-1])
 CACHE_FINETUNED = "corpus_embeddings_finetuned_resolved.pkl"
 
 class FineTunedDenseSearcher:
