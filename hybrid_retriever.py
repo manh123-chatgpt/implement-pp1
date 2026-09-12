@@ -3,7 +3,7 @@ import json
 import zipfile
 import numpy as np
 from tqdm import tqdm
-from data_loader import load_corpus, load_train_data, load_test_data
+from data_loader import load_corpus, load_train_data, load_test_data, WORK_DIR
 from bm25_retriever import BM25Searcher
 from dense_retriever import DenseSearcher
 from evaluator import compute_metrics
