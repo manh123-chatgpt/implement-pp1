@@ -40,14 +40,22 @@ def fast_preprocess(text, remove_stopwords=False):
 class BM25Searcher:
     def __init__(self, corpus, use_cache=True):
         self.doc_ids = list(corpus.keys())
+        loaded = False
         
         if use_cache and os.path.exists(CACHE_FILE):
             print(f"⚡ Đang nạp chỉ mục BM25 v2 từ cache '{CACHE_FILE}'...")
-            with open(CACHE_FILE, "rb") as f:
-                data = pickle.load(f)
+            try:
+                with open(CACHE_FILE, "rb") as f:
+                    data = pickle.load(f)
                 self.doc_ids = data["doc_ids"]
                 self.tokenized_corpus = data["tokens"]
-        else:
+                loaded = True
+                print(f"✅ Nạp thành công cache BM25 ({len(self.tokenized_corpus)} văn bản).")
+            except Exception as e:
+                print(f"⚠️ File cache BM25 '{CACHE_FILE}' bị lỗi hoặc không hoàn chỉnh ({e}). Tự động tạo chỉ mục mới...")
+                loaded = False
+
+        if not loaded:
             print("⚡ Đang tiền xử lý nâng cao với Title Boosting cho 8.532 văn bản...")
             self.tokenized_corpus = []
             for doc_id in tqdm(self.doc_ids, desc="Indexing BM25"):
@@ -55,9 +63,12 @@ class BM25Searcher:
                 tokens = fast_preprocess(full_text)
                 self.tokenized_corpus.append(tokens)
             
-            with open(CACHE_FILE, "wb") as f:
-                pickle.dump({"doc_ids": self.doc_ids, "tokens": self.tokenized_corpus}, f)
-            print(f"✅ Đã lưu cache BM25 vào '{CACHE_FILE}'.")
+            try:
+                with open(CACHE_FILE, "wb") as f:
+                    pickle.dump({"doc_ids": self.doc_ids, "tokens": self.tokenized_corpus}, f)
+                print(f"✅ Đã lưu cache BM25 vào '{CACHE_FILE}'.")
+            except Exception as e:
+                print(f"⚠️ Không thể lưu cache BM25: {e}")
             
         print("Đang khởi tạo thuật toán BM25 (k1=1.2, b=0.3 - Tối ưu cho Legal Long-Text)...")
         self.bm25 = BM25Okapi(self.tokenized_corpus, k1=1.2, b=0.3)

@@ -77,9 +77,13 @@ def train_cross_encoder():
 
     semi_hard_negatives = {}
     if os.path.exists(neg_file):
-        with open(neg_file, "rb") as f:
-            semi_hard_negatives = pickle.load(f)
-        print(f"✅ Đã nạp Semi-Hard Negatives cho {len(semi_hard_negatives)} câu hỏi từ '{neg_file}'.")
+        try:
+            with open(neg_file, "rb") as f:
+                semi_hard_negatives = pickle.load(f)
+            print(f"✅ Đã nạp Semi-Hard Negatives cho {len(semi_hard_negatives)} câu hỏi từ '{neg_file}'.")
+        except Exception as e:
+            print(f"⚠️ File Semi-Hard Negatives '{neg_file}' bị lỗi hoặc không hoàn chỉnh ({e}). Cần khai thác lại!")
+            return
     else:
         print(f"⚠️ Chưa tìm thấy '{neg_file}'. Hãy chạy 'python mine_semi_hard_negatives.py' trước!")
         return

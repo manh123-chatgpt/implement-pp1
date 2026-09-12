@@ -106,14 +106,22 @@ class DenseSearcher:
         )
         self.model.max_seq_length = 512
 
+        loaded = False
         if use_cache and os.path.exists(EMBEDDINGS_CACHE):
             print(f"⚡ Đang nạp Full-Chunked Embeddings từ '{EMBEDDINGS_CACHE}'...")
-            with open(EMBEDDINGS_CACHE, "rb") as f:
-                data = pickle.load(f)
+            try:
+                with open(EMBEDDINGS_CACHE, "rb") as f:
+                    data = pickle.load(f)
                 self.unique_doc_ids = data["unique_doc_ids"]
                 self.chunk_doc_ids = data["chunk_doc_ids"]
                 self.corpus_embeddings = data["embeddings"]
-        else:
+                loaded = True
+                print(f"✅ Nạp thành công cache BGE-M3 ({len(self.corpus_embeddings)} vectors).")
+            except Exception as e:
+                print(f"⚠️ Cache BGE-M3 '{EMBEDDINGS_CACHE}' bị lỗi hoặc không hoàn chỉnh ({e}). Đang tái tạo embeddings...")
+                loaded = False
+
+        if not loaded:
             print("⚡ Đang LEGAL CHUNKING toàn bộ văn bản (bge-m3 FP16)...")
             all_chunks = []
             chunk_doc_ids = []
@@ -184,14 +192,22 @@ class FineTunedDenseSearcher:
         self.model = SentenceTransformer(model_path, device=device)
         self.model.max_seq_length = 256
 
+        loaded = False
         if use_cache and os.path.exists(CACHE_FINETUNED):
             print(f"⚡ Đang nạp Fine-tuned Full-Chunked Embeddings từ '{CACHE_FINETUNED}'...")
-            with open(CACHE_FINETUNED, "rb") as f:
-                data = pickle.load(f)
+            try:
+                with open(CACHE_FINETUNED, "rb") as f:
+                    data = pickle.load(f)
                 self.unique_doc_ids = data["unique_doc_ids"]
                 self.chunk_doc_ids = data["chunk_doc_ids"]
                 self.corpus_embeddings = data["embeddings"]
-        else:
+                loaded = True
+                print(f"✅ Nạp thành công cache Fine-tuned Bi-Encoder ({len(self.corpus_embeddings)} vectors).")
+            except Exception as e:
+                print(f"⚠️ Cache Fine-tuned Bi-Encoder '{CACHE_FINETUNED}' bị lỗi hoặc không hoàn chỉnh ({e}). Đang tái tạo embeddings...")
+                loaded = False
+
+        if not loaded:
             print("⚡ Đang LEGAL CHUNKING + Encode từ mô hình Fine-tuned Super...")
             all_chunks = []
             chunk_doc_ids = []
@@ -260,14 +276,22 @@ class E5LargeSearcher:
         # E5-Large hỗ trợ tới 512 tokens
         self.model.max_seq_length = 512
 
+        loaded = False
         if use_cache and os.path.exists(CACHE_E5):
             print(f"⚡ Đang nạp E5-Large Embeddings từ '{CACHE_E5}'...")
-            with open(CACHE_E5, "rb") as f:
-                data = pickle.load(f)
+            try:
+                with open(CACHE_E5, "rb") as f:
+                    data = pickle.load(f)
                 self.unique_doc_ids = data["unique_doc_ids"]
                 self.chunk_doc_ids = data["chunk_doc_ids"]
                 self.corpus_embeddings = data["embeddings"]
-        else:
+                loaded = True
+                print(f"✅ Nạp thành công cache E5-Large ({len(self.corpus_embeddings)} vectors).")
+            except Exception as e:
+                print(f"⚠️ Cache E5-Large '{CACHE_E5}' bị lỗi hoặc không hoàn chỉnh ({e}). Đang tái tạo embeddings...")
+                loaded = False
+
+        if not loaded:
             print("⚡ Đang LEGAL CHUNKING toàn bộ văn bản cho E5-Large...")
             all_chunks = []
             chunk_doc_ids = []
