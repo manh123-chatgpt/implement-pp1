@@ -185,11 +185,12 @@ class CrossEncoderReranker:
             return top_docs[:top_k]
 
 class HybridSearcher:
-    def __init__(self, corpus, use_reranker=True, light_mode=True):
+    def __init__(self, corpus, use_reranker=True, light_mode=True, reranker_model_path=None):
         """
         light_mode=True (Chuẩn BTC UIT): Chỉ dùng BM25 + Fine-tuned Bi-Encoder để lọc Top 90,
         sau đó đưa qua Cross-Encoder (PhoRanker) re-rank. Chạy siêu nhanh (<15 phút trên Kaggle).
         light_mode=False: Nạp thêm BGE-M3 và E5-Large (tốn nhiều giờ mã hóa).
+        reranker_model_path: Đường dẫn mô hình Cross-Encoder tùy chỉnh (nếu có).
         """
         print(f"🚀 Khởi tạo HỆ THỐNG 2-STAGE RETRIEVAL CHUẨN BTC UIT (Light Mode: {light_mode})...")
         self.corpus = corpus
@@ -219,7 +220,7 @@ class HybridSearcher:
 
         # Giai đoạn 2: Bộ tái xếp hạng (Cross-Encoder Re-ranker)
         if use_reranker:
-            self.reranker = CrossEncoderReranker(corpus=corpus)
+            self.reranker = CrossEncoderReranker(model_path=reranker_model_path, corpus=corpus)
         else:
             self.reranker = None
 
