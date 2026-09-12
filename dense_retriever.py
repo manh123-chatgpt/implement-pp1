@@ -11,7 +11,13 @@ import re
 
 # BAAI/bge-m3: Legal-Aware Chunking + Max-Pooling trên toàn bộ nội dung luật
 MODEL_NAME = "BAAI/bge-m3"
-EMBEDDINGS_CACHE = "corpus_embeddings_bgem3_resolved.pkl"
+_BGEM3_CACHE_CANDIDATES = [
+    "corpus_embeddings_bgem3_resolved.pkl",
+    "/kaggle/working/corpus_embeddings_bgem3_resolved.pkl",
+    "/kaggle/input/notebooks/thurdayafternoon/legal-ir/corpus_embeddings_bgem3_resolved.pkl",
+    "/kaggle/input/datasets/thurdayafternoon/pkl-cache/corpus_embeddings_bgem3_resolved.pkl",
+]
+EMBEDDINGS_CACHE = next((p for p in _BGEM3_CACHE_CANDIDATES if os.path.exists(p)), _BGEM3_CACHE_CANDIDATES[0])
 
 def chunk_document(text, chunk_size=1200, overlap=200, max_chunks=150):
     """
@@ -161,7 +167,13 @@ _model_candidates = [
     "bkai-foundation-models/vietnamese-bi-encoder"
 ]
 MODEL_FINETUNED_DIR = next((p for p in _model_candidates if _os.path.exists(p) or p == "bkai-foundation-models/vietnamese-bi-encoder"), _model_candidates[-1])
-CACHE_FINETUNED = "corpus_embeddings_finetuned_resolved.pkl"
+_FT_CACHE_CANDIDATES = [
+    "corpus_embeddings_finetuned_resolved.pkl",
+    "/kaggle/working/corpus_embeddings_finetuned_resolved.pkl",
+    "/kaggle/input/notebooks/thurdayafternoon/legal-ir/corpus_embeddings_finetuned_resolved.pkl",
+    "/kaggle/input/datasets/thurdayafternoon/pkl-cache/corpus_embeddings_finetuned_resolved.pkl",
+]
+CACHE_FINETUNED = next((p for p in _FT_CACHE_CANDIDATES if _os.path.exists(p)), _FT_CACHE_CANDIDATES[0])
 
 class FineTunedDenseSearcher:
     """RoBERTa Fine-tuned với Legal-Aware Chunking (chia theo Điều luật)"""
@@ -225,7 +237,13 @@ class FineTunedDenseSearcher:
 
 # E5-Large Multilingual: Mô hình 560M params mạnh mẽ với Instruction-based Encoding
 MODEL_E5_NAME = "intfloat/multilingual-e5-large"
-CACHE_E5 = "corpus_embeddings_e5_resolved.pkl"
+_E5_CACHE_CANDIDATES = [
+    "corpus_embeddings_e5_resolved.pkl",
+    "/kaggle/working/corpus_embeddings_e5_resolved.pkl",
+    "/kaggle/input/notebooks/thurdayafternoon/legal-ir/corpus_embeddings_e5_resolved.pkl",
+    "/kaggle/input/datasets/thurdayafternoon/pkl-cache/corpus_embeddings_e5_resolved.pkl",
+]
+CACHE_E5 = next((p for p in _E5_CACHE_CANDIDATES if _os.path.exists(p)), _E5_CACHE_CANDIDATES[0])
 
 class E5LargeSearcher:
     """E5-Large với Legal-Aware Chunking. BẮT BUỘC thêm prefix 'query: ' và 'passage: '"""

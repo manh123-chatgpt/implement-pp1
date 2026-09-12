@@ -1,6 +1,7 @@
 import os
 import json
 import zipfile
+import torch
 import numpy as np
 from tqdm import tqdm
 from data_loader import load_corpus, load_train_data, load_test_data, WORK_DIR
@@ -123,7 +124,6 @@ def get_best_chunk_bm25(query, text, max_chunk_chars=800):
 
 class CrossEncoderReranker:
     def __init__(self, model_path=None, corpus=None):
-        import torch
         self.corpus = corpus
         self.is_active = False
 
@@ -132,6 +132,8 @@ class CrossEncoderReranker:
             model_path,
             os.path.join(WORK_DIR, "fine_tuned_vietnamese_cross_encoder"),
             "fine_tuned_vietnamese_cross_encoder",
+            "/kaggle/input/notebooks/thurdayafternoon/legal-ir/fine_tuned_vietnamese_cross_encoder",
+            "/kaggle/input/datasets/thurdayafternoon/pkl-cache/fine_tuned_vietnamese_cross_encoder",
             "/kaggle/input/fine-tuned-vietnamese-cross-encoder/fine_tuned_vietnamese_cross_encoder",
             "itdainb/PhoRanker"
         ]

@@ -8,7 +8,13 @@ from pyvi import ViTokenizer
 from data_loader import load_corpus, load_train_data
 from evaluator import compute_metrics
 
-CACHE_FILE = "bm25_tokenized_cache_pyvi_v2.pkl"
+_BM25_CACHE_CANDIDATES = [
+    "bm25_tokenized_cache_pyvi_v2.pkl",
+    "/kaggle/working/bm25_tokenized_cache_pyvi_v2.pkl",
+    "/kaggle/input/notebooks/thurdayafternoon/legal-ir/bm25_tokenized_cache_pyvi_v2.pkl",
+    "/kaggle/input/datasets/thurdayafternoon/pkl-cache/bm25_tokenized_cache_pyvi_v2.pkl",
+]
+CACHE_FILE = next((p for p in _BM25_CACHE_CANDIDATES if os.path.exists(p)), _BM25_CACHE_CANDIDATES[0])
 
 # Các từ để hỏi phổ biến trong tiếng Việt cần lọc bớt khi truy vấn để tránh làm loãng từ khóa cốt lõi
 QUESTION_STOPWORDS = {

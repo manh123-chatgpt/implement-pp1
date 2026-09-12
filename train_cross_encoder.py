@@ -15,6 +15,15 @@ import string
 from rank_bm25 import BM25Okapi
 import numpy as np
 
+# ⚠️ ÉP SINGLE GPU để tránh lỗi sentence-transformers DataParallel ('tokenizer' attribute error)
+# Khi chạy trên Kaggle GPU T4x2 (2 GPUs), CrossEncoder tự động bọc model vào DataParallel,
+# dẫn đến lỗi AttributeError: 'DataParallel' object has no attribute 'tokenizer'.
+if torch.cuda.is_available():
+    torch.cuda.device_count = lambda: 1
+
+if not hasattr(torch.nn.DataParallel, "tokenizer"):
+    torch.nn.DataParallel.tokenizer = property(lambda self: getattr(self.module, "tokenizer", None))
+
 # Các siêu tham số chuẩn theo nghiên cứu của BTC SoICT / UIT (Bảng 2, Mục 7.2)
 BASE_MODEL = "itdainb/PhoRanker"
 OUTPUT_DIR = os.path.join(WORK_DIR, "fine_tuned_vietnamese_cross_encoder")
@@ -41,22 +50,30 @@ def get_best_passage(question, full_text, max_chars=600):
     return chunks[best_idx]
 
 def train_cross_encoder():
+    # ⚠️ ÉP SINGLE GPU để tránh lỗi DataParallel ('tokenizer' attribute error)
+    # DataParallel wrap model khiến sentence-transformers không truy cập được tokenizer
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    
     print("=" * 70)
     print(f"🚀 BẮT ĐẦU HUẤN LUYỆN CROSS-ENCODER '{BASE_MODEL}' CHUẨN BTC UIT")
     print(f"⚙️ Epochs: {EPOCHS} | LR: {LR} | Batch Size: {BATCH_SIZE} | Max Length: {MAX_LENGTH}")
     print("=" * 70)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"🖥️ Thiết bị tính toán: {device.upper()}")
+    print(f"🖥️ Thiết bị tính toán: {device.upper()} (Single GPU - tránh DataParallel)")
 
     # 1. Nạp dữ liệu
     corpus = load_corpus()
     train_data = load_train_data()
 
     # Nạp Semi-Hard Negatives đã khai thác
-    neg_file = os.path.join(WORK_DIR, "semi_hard_negatives.pkl")
-    if not os.path.exists(neg_file):
-        neg_file = "semi_hard_negatives.pkl"
+    _NEG_CANDIDATES = [
+        os.path.join(WORK_DIR, "semi_hard_negatives.pkl"),
+        "semi_hard_negatives.pkl",
+        "/kaggle/input/notebooks/thurdayafternoon/legal-ir/semi_hard_negatives.pkl",
+        "/kaggle/input/datasets/thurdayafternoon/pkl-cache/semi_hard_negatives.pkl",
+    ]
+    neg_file = next((p for p in _NEG_CANDIDATES if os.path.exists(p)), _NEG_CANDIDATES[0])
 
     semi_hard_negatives = {}
     if os.path.exists(neg_file):
@@ -128,13 +145,24 @@ def train_cross_encoder():
 
     # 4. Khởi tạo mô hình PhoRanker
     print(f"⚡ Đang tải Cross-Encoder '{BASE_MODEL}'...")
-    model = CrossEncoder(
-        BASE_MODEL,
-        num_labels=1,
-        max_length=MAX_LENGTH,
-        device=device,
-        default_activation_function=torch.nn.Identity()
-    )
+    # Dùng 'activation_fn' thay cho 'default_activation_function' (deprecated)
+    try:
+        model = CrossEncoder(
+            BASE_MODEL,
+            num_labels=1,
+            max_length=MAX_LENGTH,
+            device=device,
+            activation_fn=torch.nn.Identity()
+        )
+    except TypeError:
+        # Fallback cho phiên bản sentence-transformers cũ
+        model = CrossEncoder(
+            BASE_MODEL,
+            num_labels=1,
+            max_length=MAX_LENGTH,
+            device=device,
+            default_activation_function=torch.nn.Identity()
+        )
 
     # Đánh giá trên tập validation
     evaluator = None
