@@ -41,38 +41,124 @@ def chunk_document(text, chunk_size=1200, overlap=200, max_chunks=150):
         
     return chunks
 
+def _split_by_sub_structure(text, max_chars):
+    """
+    Chia nhỏ một phần văn bản pháp lý (VD: 1 Điều quá dài) theo cấu trúc con:
+    Level 1: Khoản (Paragraph) — ký hiệu số Ả Rập: "1. ", "2. ", "3. "
+    Level 2: Điểm (Point) — ký hiệu chữ cái: "a) ", "b) ", "c) "
+    Level 3: Gạch đầu dòng: "- "
+    
+    Trả về danh sách các phần đã chia nhỏ. Nếu không tìm thấy cấu trúc con,
+    trả về danh sách chỉ chứa text gốc.
+    """
+    # Level 1: Tách theo Khoản (1., 2., 3., ...)
+    # Pattern: dòng mới + số + dấu chấm + khoảng trắng (tránh match số hiệu luật kiểu 136/2020)
+    khoan_parts = re.split(r'(?=\n\d+\.\s)', text)
+    khoan_parts = [p.strip() for p in khoan_parts if p.strip()]
+    
+    if len(khoan_parts) >= 2:
+        # Thành công chia theo Khoản!
+        result = []
+        for kp in khoan_parts:
+            if len(kp) <= max_chars:
+                result.append(kp)
+            else:
+                # Khoản vẫn quá dài → thử chia tiếp theo Điểm (a), b), c))
+                diem_parts = re.split(r'(?=\n[a-zđ]\)\s)', kp)
+                diem_parts = [dp.strip() for dp in diem_parts if dp.strip()]
+                if len(diem_parts) >= 2:
+                    result.extend(diem_parts)
+                else:
+                    # Thử chia theo gạch đầu dòng (- )
+                    dash_parts = re.split(r'(?=\n-\s)', kp)
+                    dash_parts = [dp.strip() for dp in dash_parts if dp.strip()]
+                    if len(dash_parts) >= 2:
+                        result.extend(dash_parts)
+                    else:
+                        result.append(kp)
+        return result
+    
+    # Level 2: Nếu không có Khoản, thử tách theo Điểm trực tiếp
+    diem_parts = re.split(r'(?=\n[a-zđ]\)\s)', text)
+    diem_parts = [p.strip() for p in diem_parts if p.strip()]
+    if len(diem_parts) >= 2:
+        return diem_parts
+    
+    # Level 3: Thử tách theo gạch đầu dòng
+    dash_parts = re.split(r'(?=\n-\s)', text)
+    dash_parts = [p.strip() for p in dash_parts if p.strip()]
+    if len(dash_parts) >= 2:
+        return dash_parts
+    
+    # Không tìm thấy cấu trúc con
+    return [text]
+
+
 def legal_chunk_document(text, max_chunk_chars=1200, overlap=200, max_chunks=150):
     """
-    Chia tài liệu theo cấu trúc pháp lý 'Điều X'.
-    91% tài liệu trong corpus có cấu trúc này.
-    Mỗi 'Điều' trở thành 1 chunk ngữ nghĩa hoàn chỉnh.
-    Nếu không tìm thấy 'Điều' → fallback về character chunking.
+    Chia tài liệu theo cấu trúc pháp lý phân cấp (Hierarchical Legal Chunking):
+    
+    Level 0: Điều (Article) — "Điều 1", "Điều 2", ...
+    Level 1: Khoản (Paragraph) — "1. ", "2. ", "3. ", ...
+    Level 2: Điểm (Point) — "a) ", "b) ", "c) ", ...
+    Level 3: Gạch đầu dòng — "- "
+    
+    Quy tắc:
+    - 91% tài liệu có cấu trúc "Điều" → chia theo Điều trước.
+    - Nếu 1 Điều quá dài (> max_chunk_chars) → chia tiếp theo Khoản/Điểm/Gạch đầu dòng.
+    - Nếu vẫn quá dài → fallback về character chunking.
+    - Nếu không có cấu trúc "Điều" → fallback hoàn toàn.
     """
     lines = text.split("\n", 1)
     title = lines[0] if lines else ""
     body = lines[1] if len(lines) > 1 else text
     
     # Chia theo ranh giới "Điều X" (lookahead để giữ lại từ "Điều")
-    parts = re.split(r'(?=Điều\s+\d+)', body)
-    parts = [p.strip() for p in parts if p.strip()]
+    dieu_parts = re.split(r'(?=Điều\s+\d+)', body)
+    dieu_parts = [p.strip() for p in dieu_parts if p.strip()]
     
-    # Nếu không tìm thấy cấu trúc Điều → fallback
-    if len(parts) < 2:
-        return chunk_document(text, chunk_size=max_chunk_chars, overlap=overlap, max_chunks=max_chunks)
+    # Nếu không tìm thấy cấu trúc Điều → thử chia theo Khoản/Điểm trực tiếp
+    if len(dieu_parts) < 2:
+        # Có thể văn bản chỉ là 1 Điều duy nhất nhưng có nhiều Khoản
+        sub_parts = _split_by_sub_structure(body, max_chunk_chars)
+        if len(sub_parts) >= 2:
+            dieu_parts = sub_parts
+        else:
+            return chunk_document(text, chunk_size=max_chunk_chars, overlap=overlap, max_chunks=max_chunks)
     
+    # Bước 2: Xử lý từng Điều — nếu quá dài, chia nhỏ theo Khoản/Điểm
+    all_semantic_parts = []
+    for part in dieu_parts:
+        if len(part) <= max_chunk_chars:
+            all_semantic_parts.append(part)
+        else:
+            # Điều quá dài → chia nhỏ theo cấu trúc con (Khoản → Điểm → Gạch đầu dòng)
+            sub_parts = _split_by_sub_structure(part, max_chunk_chars)
+            
+            # Giữ lại header của Điều (VD: "Điều 15. Quyền của người lao động")
+            dieu_header = ""
+            first_newline = part.find("\n")
+            if first_newline > 0 and first_newline < 200:
+                dieu_header = part[:first_newline].strip()
+            
+            for sp in sub_parts:
+                # Nếu sub_part không bắt đầu bằng "Điều", thêm header để giữ ngữ cảnh
+                if dieu_header and not sp.startswith("Điều"):
+                    sp = f"{dieu_header}\n{sp}"
+                all_semantic_parts.append(sp)
+    
+    # Bước 3: Gộp các phần ngắn lại và xử lý phần vẫn quá dài
     chunks = []
     buffer = ""
     
-    for part in parts:
-        # Gộp các phần ngắn lại với nhau cho đến khi đủ dày
+    for part in all_semantic_parts:
         if buffer and len(buffer) + len(part) <= max_chunk_chars:
             buffer = buffer + "\n" + part
         else:
-            # Lưu buffer hiện tại (nếu có)
             if buffer:
                 chunks.append(f"{title}\n{buffer}")
             
-            # Nếu phần này quá dài → chia nhỏ tiếp
+            # Phần vẫn quá dài sau khi chia theo cấu trúc con → character chunking
             if len(part) > max_chunk_chars:
                 start = 0
                 while start < len(part) and len(chunks) < max_chunks:

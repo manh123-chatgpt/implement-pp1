@@ -13,14 +13,14 @@ random.seed(RANDOM_SEED)
 def mine_semi_hard_negatives(
     output_path="semi_hard_negatives.pkl",
     top_candidates_k=90,
-    num_negatives=50
+    num_negatives=999
 ):
     """
     Thuật toán Semi-Hard Negative Mining chuẩn theo nghiên cứu của BTC SoICT / UIT:
     1. Bi-Encoder dự đoán danh sách Top 90 ứng viên cho mỗi câu hỏi trong train.
     2. Loại bỏ các đáp án đúng (true positives).
-    3. Chọn NGẪU NHIÊN n = 10 văn bản từ số còn lại trong Top 90 làm Semi-Hard Negatives.
-    (Tránh Hard Negatives quá khó làm nổ gradient và suy giảm mô hình).
+    3. Lấy TẤT CẢ văn bản còn lại trong Top 90 làm Semi-Hard Negatives (max ~87-89 mẫu/câu).
+       (num_negatives=999 → lấy toàn bộ non-positive candidates có sẵn)
     """
     print("=" * 70)
     print("⛏️ KHAI THÁC MẪU ÂM BÁN KHÓ (SEMI-HARD NEGATIVE MINING) CHUẨN BTC UIT")
