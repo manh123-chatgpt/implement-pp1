@@ -185,7 +185,7 @@ class CrossEncoderReranker:
                 print(f"⚠️ Không thể nạp Cross-Encoder: {e2}. Hệ thống sẽ sử dụng điểm lọc Stage 1.")
                 self.is_active = False
 
-    def rerank(self, query, top_docs, candidate_scores=None, mega_boost_docs=None, exact_matched_docs=None, top_k=5):
+    def rerank(self, query, top_docs, candidate_scores=None, mega_boost_docs=None, exact_matched_docs=None, top_k=5, st1_weight=None):
         if not self.is_active or not self.corpus or not top_docs:
             return top_docs[:top_k]
 
@@ -245,13 +245,14 @@ class CrossEncoderReranker:
                 else:
                     st1_norm = (len(top_docs) - i) / len(top_docs)
 
-                # Trọng số Fusion: Stage 1 (Ensemble) đã đạt Recall ~89.4%,
-                # Cross-Encoder chỉ nên tinh chỉnh nhẹ, KHÔNG ĐƯỢC áp đảo Stage 1!
-                if self.is_finetuned:
-                    fused = 0.75 * st1_norm + 0.25 * rr_norm
+                # Trọng số Fusion (có thể tùy chỉnh qua st1_weight)
+                if st1_weight is not None:
+                    w_st1 = st1_weight
+                elif self.is_finetuned:
+                    w_st1 = 0.75
                 else:
-                    # Nếu chưa fine-tune (zero-shot), ưu tiên Stage 1 để bảo toàn Recall ~80%+
-                    fused = 0.85 * st1_norm + 0.15 * rr_norm
+                    w_st1 = 0.85
+                fused = w_st1 * st1_norm + (1.0 - w_st1) * rr_norm
 
                 if doc_id in mega_boost_docs:
                     fused += 100.0
@@ -305,16 +306,16 @@ class HybridSearcher:
         else:
             self.reranker = None
 
-    def search(self, query, top_k=5, candidate_k=90, rerank_top_k=30, rrf_k=10):
+    def search(self, query, top_k=5, candidate_k=90, rerank_top_k=30, rrf_k=10, st1_weight=None):
         """
         Quy trình 2 giai đoạn chuẩn BTC:
         - Giai đoạn 1: BM25 + Bi-Encoder + Luật boost lấy Top 90 ứng viên.
-        - Giai đoạn 2: Cross-Encoder PhoRanker re-rank Top 30 tinh hoa nhất (tránh nhiễu từ vị trí 50-90).
+        - Giai đoạn 2: Cross-Encoder PhoRanker re-rank Top 30 tinh hoa nhất.
         
         Args:
             candidate_k: Số ứng viên Stage 1 lấy từ mỗi mô hình (90).
-            rerank_top_k: Số ứng viên tinh hoa đưa vào Re-ranker (30). 
-                          Giảm từ 90→30 để loại bỏ nhiễu từ các ứng viên xa.
+            rerank_top_k: Số ứng viên tinh hoa đưa vào Re-ranker (30).
+            st1_weight: Trọng số Stage 1 trong fusion (0.0-1.0). None = dùng mặc định.
         """
         query_laws = extract_law_numbers(query)
         query_articles = extract_article_number(query)
@@ -385,7 +386,8 @@ class HybridSearcher:
                 candidate_scores=scores,
                 mega_boost_docs=mega_boost_docs,
                 exact_matched_docs=exact_matched_docs,
-                top_k=top_k
+                top_k=top_k,
+                st1_weight=st1_weight
             )
         
         return top_candidates[:top_k]
