@@ -268,11 +268,13 @@ class CrossEncoderReranker:
             return top_docs[:top_k]
 
 class HybridSearcher:
-    def __init__(self, corpus, use_reranker=False, light_mode=True, reranker_model_path=None):
+    def __init__(self, corpus, use_reranker=False, light_mode=True, reranker_model_path=None,
+                 bm25_type="okapi", bm25_k1=1.2, bm25_b=0.3):
         """
-        use_reranker=False: Hệ thống Stage 1 (BM25 + Bi-Encoder + Rules). Đạt Recall@5 ~80% ngay lập tức, chạy siêu nhanh.
-        use_reranker=True: Kích hoạt Cross-Encoder (PhoRanker). Nên dùng khi đã fine-tune mô hình (Cell 13) để đẩy Recall lên cao nhất!
-        light_mode=True: Sử dụng BM25 + Bi-Encoder.
+        use_reranker=False: Hệ thống Stage 1 (BM25 + Bi-Encoder + Rules).
+        use_reranker=True: Kích hoạt Cross-Encoder PhoRanker.
+        bm25_type: "okapi" hoặc "plus" (BM25Plus).
+        bm25_k1/bm25_b: Tham số BM25 cho Grid Search.
         """
         print(f"🚀 Khởi tạo HỆ THỐNG RETRIEVAL CHUẨN BTC UIT (Light Mode: {light_mode} | Reranker: {use_reranker})...")
         self.corpus = corpus
@@ -290,7 +292,7 @@ class HybridSearcher:
                 self.doc_law_numbers[doc_id] = laws
         
         # Giai đoạn 1: Bộ thu thập ứng viên (Candidate Retrieval)
-        self.bm25_searcher = BM25Searcher(corpus, use_cache=True)
+        self.bm25_searcher = BM25Searcher(corpus, use_cache=True, bm25_type=bm25_type, k1=bm25_k1, b=bm25_b)
         self.finetuned_searcher = FineTunedDenseSearcher(corpus, use_cache=True)
         
         if not light_mode:

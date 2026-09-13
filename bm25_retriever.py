@@ -3,7 +3,7 @@ import re
 import pickle
 import numpy as np
 from tqdm import tqdm
-from rank_bm25 import BM25Okapi
+from rank_bm25 import BM25Okapi, BM25Plus
 from pyvi import ViTokenizer
 from data_loader import load_corpus, load_train_data
 from evaluator import compute_metrics
@@ -38,7 +38,13 @@ def fast_preprocess(text, remove_stopwords=False):
     return tokens
 
 class BM25Searcher:
-    def __init__(self, corpus, use_cache=True):
+    def __init__(self, corpus, use_cache=True, bm25_type="okapi", k1=1.2, b=0.3):
+        """
+        Args:
+            bm25_type: "okapi" (mặc định) hoặc "plus" (BM25Plus từ paper).
+            k1: Tham số k1 — điều chỉnh term frequency saturation.
+            b: Tham số b — điều chỉnh document length normalization.
+        """
         self.doc_ids = list(corpus.keys())
         loaded = False
         
@@ -70,9 +76,14 @@ class BM25Searcher:
             except Exception as e:
                 print(f"⚠️ Không thể lưu cache BM25: {e}")
             
-        print("Đang khởi tạo thuật toán BM25 (k1=1.2, b=0.3 - Tối ưu cho Legal Long-Text)...")
-        self.bm25 = BM25Okapi(self.tokenized_corpus, k1=1.2, b=0.3)
-        print("✅ Đã sẵn sàng tìm kiếm BM25!")
+        bm25_label = bm25_type.upper()
+        if bm25_type.lower() == "plus":
+            print(f"Đang khởi tạo thuật toán BM25Plus (k1={k1}, b={b})...")
+            self.bm25 = BM25Plus(self.tokenized_corpus, k1=k1, b=b)
+        else:
+            print(f"Đang khởi tạo thuật toán BM25Okapi (k1={k1}, b={b})...")
+            self.bm25 = BM25Okapi(self.tokenized_corpus, k1=k1, b=b)
+        print(f"✅ Đã sẵn sàng tìm kiếm BM25 ({bm25_label})!")
 
     def search(self, query, top_k=5):
         # Lọc bớt từ hỏi để tập trung vào từ khóa quan trọng

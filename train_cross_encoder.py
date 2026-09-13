@@ -72,10 +72,25 @@ def make_collate_fn(tokenizer, max_length=256):
         return encoded, labels
     return collate_fn
 
-def train_cross_encoder():
+def train_cross_encoder(epochs=None, lr=None, batch_size=None, output_dir=None):
+    """
+    Huấn luyện Cross-Encoder PhoRanker.
+    Tất cả hyperparams đều configurable để hỗ trợ Grid Search.
+    
+    Args:
+        epochs: Số epochs (mặc định: EPOCHS=2)
+        lr: Learning rate (mặc định: LR=2e-5)
+        batch_size: Batch size (mặc định: BATCH_SIZE=32)
+        output_dir: Thư mục lưu mô hình (mặc định: OUTPUT_DIR)
+    """
+    _epochs = epochs or EPOCHS
+    _lr = lr or LR
+    _bs = batch_size or BATCH_SIZE
+    _output = output_dir or OUTPUT_DIR
+    
     print("=" * 70)
     print(f"🚀 BẮT ĐẦU HUẤN LUYỆN CROSS-ENCODER '{BASE_MODEL}' CHUẨN BTC UIT")
-    print(f"⚙️ Epochs: {EPOCHS} | LR: {LR} | Batch Size: {BATCH_SIZE} | Max Length: {MAX_LENGTH}")
+    print(f"⚙️ Epochs: {_epochs} | LR: {_lr} | Batch Size: {_bs} | Max Length: {MAX_LENGTH}")
     print("=" * 70)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -172,7 +187,7 @@ def train_cross_encoder():
     collate_fn = make_collate_fn(tokenizer, max_length=MAX_LENGTH)
     train_loader = DataLoader(
         TextPairDataset(train_samples),
-        batch_size=BATCH_SIZE,
+        batch_size=_bs,
         shuffle=True,
         collate_fn=collate_fn,
         num_workers=2 if os.name != 'nt' else 0,
@@ -181,7 +196,7 @@ def train_cross_encoder():
 
     val_loader = DataLoader(
         TextPairDataset(val_samples),
-        batch_size=BATCH_SIZE * 2,
+        batch_size=_bs * 2,
         shuffle=False,
         collate_fn=collate_fn,
         num_workers=2 if os.name != 'nt' else 0,
@@ -194,8 +209,8 @@ def train_cross_encoder():
         {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=LR)
-    total_steps = len(train_loader) * EPOCHS
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=_lr)
+    total_steps = len(train_loader) * _epochs
     warmup_steps = int(total_steps * 0.1)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
 
@@ -204,14 +219,14 @@ def train_cross_encoder():
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
 
     best_val_loss = float('inf')
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(_output, exist_ok=True)
 
-    print(f"🔥 Bắt đầu huấn luyện {EPOCHS} Epochs với PyTorch Native & AMP (Mixed Precision)...")
+    print(f"🔥 Bắt đầu huấn luyện {_epochs} Epochs với PyTorch Native & AMP (Mixed Precision)...")
 
-    for epoch in range(EPOCHS):
+    for epoch in range(_epochs):
         model.train()
         train_loss = 0.0
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{_epochs}")
         for batch_encoded, batch_labels in pbar:
             batch_encoded = {k: v.to(device) for k, v in batch_encoded.items()}
             batch_labels = batch_labels.to(device)
@@ -258,20 +273,22 @@ def train_cross_encoder():
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                print(f"💾 Lưu checkpoint tốt nhất vào: '{OUTPUT_DIR}'...")
-                model.save_pretrained(OUTPUT_DIR)
-                tokenizer.save_pretrained(OUTPUT_DIR)
+                print(f"💾 Lưu checkpoint tốt nhất vào: '{_output}'...")
+                model.save_pretrained(_output)
+                tokenizer.save_pretrained(_output)
 
     # Đảm bảo mô hình cuối cùng luôn được lưu
-    if not os.path.exists(os.path.join(OUTPUT_DIR, "config.json")):
-        print(f"💾 Lưu mô hình cuối cùng vào: '{OUTPUT_DIR}'...")
-        model.save_pretrained(OUTPUT_DIR)
-        tokenizer.save_pretrained(OUTPUT_DIR)
+    if not os.path.exists(os.path.join(_output, "config.json")):
+        print(f"💾 Lưu mô hình cuối cùng vào: '{_output}'...")
+        model.save_pretrained(_output)
+        tokenizer.save_pretrained(_output)
 
     print("\n" + "=" * 70)
     print(f"🎉 HUẤN LUYỆN CROSS-ENCODER HOÀN TẤT THÀNH CÔNG!")
-    print(f"💾 Mô hình đã được lưu tại: '{OUTPUT_DIR}'")
+    print(f"💾 Mô hình đã được lưu tại: '{_output}'")
     print("=" * 70)
+    
+    return best_val_loss  # Trả về val_loss để Grid Search so sánh
 
 if __name__ == "__main__":
     train_cross_encoder()
