@@ -13,7 +13,7 @@ random.seed(RANDOM_SEED)
 def mine_semi_hard_negatives(
     output_path="semi_hard_negatives.pkl",
     top_candidates_k=90,
-    num_negatives=10
+    num_negatives=50
 ):
     """
     Thuật toán Semi-Hard Negative Mining chuẩn theo nghiên cứu của BTC SoICT / UIT:

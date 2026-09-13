@@ -128,6 +128,17 @@ class CrossEncoderReranker:
         self.is_active = False
         self.use_hf = False
 
+        # Đồng bộ Pyvi tokenization giữa train và inference
+        self.has_pyvi = False
+        try:
+            from pyvi import ViTokenizer
+            self.has_pyvi = True
+            self._tokenize = ViTokenizer.tokenize
+            print("✅ CrossEncoder Reranker: Đã kích hoạt Pyvi tách từ (đồng bộ với training).")
+        except ImportError:
+            self._tokenize = lambda x: x
+            print("ℹ️ CrossEncoder Reranker: Pyvi không khả dụng, sử dụng văn bản gốc.")
+
         # Tự động dò đường dẫn model đã fine-tune, hoặc tải PhoRanker gốc
         candidates = [
             model_path,
@@ -182,11 +193,15 @@ class CrossEncoderReranker:
         exact_matched_docs = exact_matched_docs or set()
 
         # Chuẩn bị cặp (query, doc_passage) cho từng ứng viên
+        # ⚠️ QUAN TRỌNG: Phải tách từ Pyvi cho CẢ query và passage
+        # để đồng bộ với lúc train_cross_encoder.py đã tokenize bằng Pyvi!
+        query_tok = self._tokenize(query) if self.has_pyvi else query
         pairs = []
         for doc_id in top_docs:
             doc_text = self.corpus.get(str(doc_id), "")
             passage = get_best_chunk_bm25(query, doc_text, max_chunk_chars=600)
-            pairs.append([query, passage])
+            passage_tok = self._tokenize(passage) if self.has_pyvi else passage
+            pairs.append([query_tok, passage_tok])
 
         try:
             batch_sz = 32 if torch.cuda.is_available() else 8
@@ -230,12 +245,13 @@ class CrossEncoderReranker:
                 else:
                     st1_norm = (len(top_docs) - i) / len(top_docs)
 
-                # Trọng số Fusion
+                # Trọng số Fusion: Stage 1 (Ensemble) đã đạt Recall ~89.4%,
+                # Cross-Encoder chỉ nên tinh chỉnh nhẹ, KHÔNG ĐƯỢC áp đảo Stage 1!
                 if self.is_finetuned:
-                    fused = 0.4 * st1_norm + 0.6 * rr_norm
+                    fused = 0.75 * st1_norm + 0.25 * rr_norm
                 else:
                     # Nếu chưa fine-tune (zero-shot), ưu tiên Stage 1 để bảo toàn Recall ~80%+
-                    fused = 0.8 * st1_norm + 0.2 * rr_norm
+                    fused = 0.85 * st1_norm + 0.15 * rr_norm
 
                 if doc_id in mega_boost_docs:
                     fused += 100.0
@@ -289,11 +305,16 @@ class HybridSearcher:
         else:
             self.reranker = None
 
-    def search(self, query, top_k=5, candidate_k=90, rrf_k=10):
+    def search(self, query, top_k=5, candidate_k=90, rerank_top_k=30, rrf_k=10):
         """
         Quy trình 2 giai đoạn chuẩn BTC:
         - Giai đoạn 1: BM25 + Bi-Encoder + Luật boost lấy Top 90 ứng viên.
-        - Giai đoạn 2: Cross-Encoder PhoRanker re-rank (nếu kích hoạt) kết hợp bảo toàn trọng số Stage 1.
+        - Giai đoạn 2: Cross-Encoder PhoRanker re-rank Top 30 tinh hoa nhất (tránh nhiễu từ vị trí 50-90).
+        
+        Args:
+            candidate_k: Số ứng viên Stage 1 lấy từ mỗi mô hình (90).
+            rerank_top_k: Số ứng viên tinh hoa đưa vào Re-ranker (30). 
+                          Giảm từ 90→30 để loại bỏ nhiễu từ các ứng viên xa.
         """
         query_laws = extract_law_numbers(query)
         query_articles = extract_article_number(query)
@@ -354,10 +375,13 @@ class HybridSearcher:
         top_candidates = [doc_id for doc_id, _ in sorted_docs[:candidate_k]]
 
         # 2. Giai đoạn Re-ranking với PhoRanker (kết hợp Score Fusion)
+        # Chỉ đưa Top rerank_top_k (30) ứng viên tinh hoa vào Re-ranker
+        # để tránh nhiễu từ các ứng viên hạng thấp (50-90)
         if self.reranker and self.reranker.is_active:
+            rerank_candidates = top_candidates[:rerank_top_k]
             return self.reranker.rerank(
                 query,
-                top_candidates,
+                rerank_candidates,
                 candidate_scores=scores,
                 mega_boost_docs=mega_boost_docs,
                 exact_matched_docs=exact_matched_docs,
