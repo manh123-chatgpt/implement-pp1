@@ -2,39 +2,34 @@ import os
 import json
 import pickle
 import random
+import string
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
-from sentence_transformers import InputExample
-from sentence_transformers.cross_encoder import CrossEncoder
-from sentence_transformers.cross_encoder.evaluation import CEBinaryClassificationEvaluator
+from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    get_linear_schedule_with_warmup
+)
 from data_loader import load_corpus, load_train_data, WORK_DIR
 from dense_retriever import legal_chunk_document
-import string
 from rank_bm25 import BM25Okapi
-import numpy as np
 
-# ⚠️ ÉP SINGLE GPU để tránh lỗi sentence-transformers DataParallel ('tokenizer' attribute error)
-# Khi chạy trên Kaggle GPU T4x2 (2 GPUs), CrossEncoder tự động bọc model vào DataParallel,
-# dẫn đến lỗi AttributeError: 'DataParallel' object has no attribute 'tokenizer'.
-if torch.cuda.is_available():
-    torch.cuda.device_count = lambda: 1
-
-if not hasattr(torch.nn.DataParallel, "tokenizer"):
-    torch.nn.DataParallel.tokenizer = property(lambda self: getattr(self.module, "tokenizer", None))
-
-# Các siêu tham số chuẩn theo nghiên cứu của BTC SoICT / UIT (Bảng 2, Mục 7.2)
+# Các siêu tham số chuẩn theo nghiên cứu của BTC SoICT / UIT
 BASE_MODEL = "itdainb/PhoRanker"
 OUTPUT_DIR = os.path.join(WORK_DIR, "fine_tuned_vietnamese_cross_encoder")
 EPOCHS = 2
 LR = 2e-5
-BATCH_SIZE = 16
+BATCH_SIZE = 32
 MAX_LENGTH = 256
 RANDOM_SEED = 28
 
 random.seed(RANDOM_SEED)
 torch.manual_seed(RANDOM_SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(RANDOM_SEED)
 
 def get_best_passage(question, full_text, max_chars=600):
     """Trích xuất đoạn điều luật liên quan nhất từ văn bản pháp lý"""
@@ -49,18 +44,42 @@ def get_best_passage(question, full_text, max_chars=600):
     best_idx = int(np.argmax(scores))
     return chunks[best_idx]
 
+class TextPairDataset(Dataset):
+    """Dataset chứa các cặp (câu hỏi, đoạn văn bản, nhãn 0/1)"""
+    def __init__(self, samples):
+        self.samples = samples
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+def make_collate_fn(tokenizer, max_length=256):
+    def collate_fn(batch):
+        queries = [item[0] for item in batch]
+        passages = [item[1] for item in batch]
+        labels = torch.tensor([item[2] for item in batch], dtype=torch.float)
+
+        encoded = tokenizer(
+            queries,
+            passages,
+            padding=True,
+            truncation="longest_first",
+            max_length=max_length,
+            return_tensors="pt"
+        )
+        return encoded, labels
+    return collate_fn
+
 def train_cross_encoder():
-    # ⚠️ ÉP SINGLE GPU để tránh lỗi DataParallel ('tokenizer' attribute error)
-    # DataParallel wrap model khiến sentence-transformers không truy cập được tokenizer
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    
     print("=" * 70)
     print(f"🚀 BẮT ĐẦU HUẤN LUYỆN CROSS-ENCODER '{BASE_MODEL}' CHUẨN BTC UIT")
     print(f"⚙️ Epochs: {EPOCHS} | LR: {LR} | Batch Size: {BATCH_SIZE} | Max Length: {MAX_LENGTH}")
     print("=" * 70)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"🖥️ Thiết bị tính toán: {device.upper()} (Single GPU - tránh DataParallel)")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print(f"🖥️ Thiết bị tính toán: {str(device).upper()}")
 
     # 1. Nạp dữ liệu
     corpus = load_corpus()
@@ -73,19 +92,19 @@ def train_cross_encoder():
         "/kaggle/input/notebooks/thurdayafternoon/legal-ir/semi_hard_negatives.pkl",
         "/kaggle/input/datasets/thurdayafternoon/pkl-cache/semi_hard_negatives.pkl",
     ]
-    neg_file = next((p for p in _NEG_CANDIDATES if os.path.exists(p)), _NEG_CANDIDATES[0])
+    neg_file = next((p for p in _NEG_CANDIDATES if os.path.exists(p) and os.path.getsize(p) > 10000), None)
 
     semi_hard_negatives = {}
-    if os.path.exists(neg_file):
+    if neg_file:
         try:
             with open(neg_file, "rb") as f:
                 semi_hard_negatives = pickle.load(f)
             print(f"✅ Đã nạp Semi-Hard Negatives cho {len(semi_hard_negatives)} câu hỏi từ '{neg_file}'.")
         except Exception as e:
-            print(f"⚠️ File Semi-Hard Negatives '{neg_file}' bị lỗi hoặc không hoàn chỉnh ({e}). Cần khai thác lại!")
+            print(f"⚠️ File Semi-Hard Negatives '{neg_file}' bị lỗi ({e}). Cần khai thác lại!")
             return
     else:
-        print(f"⚠️ Chưa tìm thấy '{neg_file}'. Hãy chạy 'python mine_semi_hard_negatives.py' trước!")
+        print("⚠️ Chưa tìm thấy file 'semi_hard_negatives.pkl' hợp lệ. Hãy chạy Bước 1 trước!")
         return
 
     # Hỗ trợ tùy chọn tách từ Pyvi nếu có
@@ -97,7 +116,7 @@ def train_cross_encoder():
     except ImportError:
         pass
 
-    # 2. Phân chia Train/Validation theo tỷ lệ 90/10 (Mục 5.4 trong bài báo)
+    # 2. Phân chia Train/Validation theo tỷ lệ 90/10
     qids = list(train_data.keys())
     random.shuffle(qids)
     split_idx = int(len(qids) * 0.9)
@@ -117,80 +136,140 @@ def train_cross_encoder():
         question = ViTokenizer.tokenize(raw_question) if has_pyvi else raw_question
         is_train = (qid in train_qids)
 
-        # 2.1. Tách từng đáp án đúng thành các cặp độc lập (Mục 5.2 trong bài báo)
+        # 2.1. Mẫu dương (Positive samples, label = 1.0)
         for ans_id in answers:
             ans_str = str(ans_id)
             if ans_str in corpus:
                 doc_text = get_best_passage(raw_question, corpus[ans_str])
                 doc_tok = ViTokenizer.tokenize(doc_text) if has_pyvi else doc_text
-                example = InputExample(texts=[question, doc_tok], label=1.0)
+                sample = (question, doc_tok, 1.0)
                 if is_train:
-                    train_samples.append(example)
+                    train_samples.append(sample)
                 else:
-                    val_samples.append(example)
+                    val_samples.append(sample)
 
-        # 2.2. Ghép cặp với Semi-Hard Negatives (Label = 0.0)
+        # 2.2. Mẫu âm bán khó (Semi-Hard Negatives, label = 0.0)
         negs = semi_hard_negatives.get(str(qid), [])
         for neg_id in negs:
             neg_str = str(neg_id)
             if neg_str in corpus:
                 doc_text = get_best_passage(raw_question, corpus[neg_str])
                 doc_tok = ViTokenizer.tokenize(doc_text) if has_pyvi else doc_text
-                example = InputExample(texts=[question, doc_tok], label=0.0)
+                sample = (question, doc_tok, 0.0)
                 if is_train:
-                    train_samples.append(example)
+                    train_samples.append(sample)
                 else:
-                    val_samples.append(example)
+                    val_samples.append(sample)
 
     print(f"✅ Tổng mẫu Train: {len(train_samples)} | Mẫu Validation: {len(val_samples)}")
 
-    # 3. Tạo DataLoader
-    train_dataloader = DataLoader(train_samples, shuffle=True, batch_size=BATCH_SIZE)
+    # 3. Tải Tokenizer & Model trực tiếp từ Transformers (Loại bỏ triệt để lỗi fit_mixin / DataParallel)
+    print(f"⚡ Đang tải mô hình & Tokenizer '{BASE_MODEL}'...")
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    model = AutoModelForSequenceClassification.from_pretrained(BASE_MODEL, num_labels=1)
+    model.to(device)
 
-    # 4. Khởi tạo mô hình PhoRanker
-    print(f"⚡ Đang tải Cross-Encoder '{BASE_MODEL}'...")
-    # Dùng 'activation_fn' thay cho 'default_activation_function' (deprecated)
-    try:
-        model = CrossEncoder(
-            BASE_MODEL,
-            num_labels=1,
-            max_length=MAX_LENGTH,
-            device=device,
-            activation_fn=torch.nn.Identity()
-        )
-    except TypeError:
-        # Fallback cho phiên bản sentence-transformers cũ
-        model = CrossEncoder(
-            BASE_MODEL,
-            num_labels=1,
-            max_length=MAX_LENGTH,
-            device=device,
-            default_activation_function=torch.nn.Identity()
-        )
-
-    # Đánh giá trên tập validation
-    evaluator = None
-    if val_samples:
-        evaluator = CEBinaryClassificationEvaluator.from_input_examples(val_samples, name="UIT-Val")
-
-    warmup_steps = int(len(train_dataloader) * EPOCHS * 0.1)
-
-    print(f"🔥 Đang huấn luyện trong {EPOCHS} Epochs với BCEWithLogitsLoss...")
-    model.fit(
-        train_dataloader=train_dataloader,
-        evaluator=evaluator,
-        epochs=EPOCHS,
-        loss_fct=nn.BCEWithLogitsLoss(),
-        evaluation_steps=len(train_dataloader) // 2 if len(train_dataloader) > 10 else 10,
-        warmup_steps=warmup_steps,
-        optimizer_params={"lr": LR},
-        output_path=OUTPUT_DIR,
-        use_amp=True if device == "cuda" else False,
-        show_progress_bar=True
+    collate_fn = make_collate_fn(tokenizer, max_length=MAX_LENGTH)
+    train_loader = DataLoader(
+        TextPairDataset(train_samples),
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        collate_fn=collate_fn,
+        num_workers=2 if os.name != 'nt' else 0,
+        pin_memory=(device.type == "cuda")
     )
 
+    val_loader = DataLoader(
+        TextPairDataset(val_samples),
+        batch_size=BATCH_SIZE * 2,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=2 if os.name != 'nt' else 0,
+        pin_memory=(device.type == "cuda")
+    ) if val_samples else None
+
+    # 4. Optimizer & Scheduler & AMP Scaler
+    no_decay = ['bias', 'LayerNorm.weight']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+        {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    ]
+    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=LR)
+    total_steps = len(train_loader) * EPOCHS
+    warmup_steps = int(total_steps * 0.1)
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
+
+    criterion = nn.BCEWithLogitsLoss()
+    use_amp = (device.type == "cuda")
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+
+    best_val_loss = float('inf')
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    print(f"🔥 Bắt đầu huấn luyện {EPOCHS} Epochs với PyTorch Native & AMP (Mixed Precision)...")
+
+    for epoch in range(EPOCHS):
+        model.train()
+        train_loss = 0.0
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}")
+        for batch_encoded, batch_labels in pbar:
+            batch_encoded = {k: v.to(device) for k, v in batch_encoded.items()}
+            batch_labels = batch_labels.to(device)
+
+            optimizer.zero_grad()
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                outputs = model(**batch_encoded)
+                logits = outputs.logits.squeeze(-1)
+                loss = criterion(logits, batch_labels)
+
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+
+            scheduler.step()
+            train_loss += loss.item()
+            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+
+        avg_train_loss = train_loss / len(train_loader)
+        print(f"📌 Epoch {epoch + 1} hoàn tất. Train Loss trung bình: {avg_train_loss:.4f}")
+
+        # Đánh giá trên Validation
+        if val_loader:
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for v_encoded, v_labels in val_loader:
+                    v_encoded = {k: v.to(device) for k, v in v_encoded.items()}
+                    v_labels = v_labels.to(device)
+                    with torch.amp.autocast('cuda', enabled=use_amp):
+                        out = model(**v_encoded)
+                        lgt = out.logits.squeeze(-1)
+                        v_l = criterion(lgt, v_labels)
+                    val_loss += v_l.item()
+            avg_val_loss = val_loss / len(val_loader)
+            print(f"📊 Validation Loss: {avg_val_loss:.4f}")
+
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                print(f"💾 Lưu checkpoint tốt nhất vào: '{OUTPUT_DIR}'...")
+                model.save_pretrained(OUTPUT_DIR)
+                tokenizer.save_pretrained(OUTPUT_DIR)
+
+    # Đảm bảo mô hình cuối cùng luôn được lưu
+    if not os.path.exists(os.path.join(OUTPUT_DIR, "config.json")):
+        print(f"💾 Lưu mô hình cuối cùng vào: '{OUTPUT_DIR}'...")
+        model.save_pretrained(OUTPUT_DIR)
+        tokenizer.save_pretrained(OUTPUT_DIR)
+
     print("\n" + "=" * 70)
-    print(f"🎉 HUẤN LUYỆN CROSS-ENCODER HOÀN TẤT!")
+    print(f"🎉 HUẤN LUYỆN CROSS-ENCODER HOÀN TẤT THÀNH CÔNG!")
     print(f"💾 Mô hình đã được lưu tại: '{OUTPUT_DIR}'")
     print("=" * 70)
 
