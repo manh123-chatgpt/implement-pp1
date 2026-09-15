@@ -490,3 +490,181 @@ class LegalEmbeddingSearcher:
                 
         sorted_docs = sorted(doc_max_scores.items(), key=lambda x: x[1], reverse=True)
         return [doc_id for doc_id, _ in sorted_docs[:top_k]]
+
+
+# =====================================================================
+# 🌟 THẾ HỆ MỚI: Jina-Embeddings-v3 (8.192 tokens Context, SOTA Toàn cầu)
+# =====================================================================
+MODEL_JINA_NAME = "jinaai/jina-embeddings-v3"
+_JINA_CACHE_CANDIDATES = [
+    "corpus_embeddings_jina_v3_resolved.pkl",
+    "/kaggle/working/corpus_embeddings_jina_v3_resolved.pkl",
+    "/kaggle/input/notebooks/thurdayafternoon/legal-ir/corpus_embeddings_jina_v3_resolved.pkl",
+    "/kaggle/input/datasets/thurdayafternoon/pkl-cache/corpus_embeddings_jina_v3_resolved.pkl",
+]
+CACHE_JINA = next((p for p in _JINA_CACHE_CANDIDATES if os.path.exists(p) and os.path.getsize(p) > 1024*1024), _JINA_CACHE_CANDIDATES[0])
+
+class JinaEmbeddingSearcher:
+    """
+    Jina Embeddings v3:
+    - Context Window siêu dài 8.192 tokens (đọc trọn vẹn mọi điều luật dài mà không bị mất chữ).
+    - Task-specific LoRA:
+        + 'retrieval.passage' cho văn bản luật
+        + 'retrieval.query' cho câu hỏi
+    """
+    def __init__(self, corpus, model_name=MODEL_JINA_NAME, use_cache=True):
+        self.unique_doc_ids = list(corpus.keys())
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"🌟 Đang tải mô hình SOTA '{model_name}' trên thiết bị: {device.upper()} (Context 8.192)...")
+        
+        self.model = SentenceTransformer(
+            model_name,
+            device=device,
+            trust_remote_code=True,
+            model_kwargs={"torch_dtype": torch.float16 if device == "cuda" else torch.float32}
+        )
+        self.model.max_seq_length = 8192
+
+        if use_cache and os.path.exists(CACHE_JINA) and os.path.getsize(CACHE_JINA) > 1024*1024:
+            print(f"⚡ Đang nạp Jina-v3 Embeddings từ '{CACHE_JINA}'...")
+            with open(CACHE_JINA, "rb") as f:
+                data = pickle.load(f)
+                self.unique_doc_ids = data["unique_doc_ids"]
+                self.chunk_doc_ids = data["chunk_doc_ids"]
+                self.corpus_embeddings = data["embeddings"]
+        else:
+            print("⚡ Đang chuẩn bị văn bản cho Jina-v3 (hỗ trợ context dài 4000 ký tự)...")
+            all_chunks = []
+            chunk_doc_ids = []
+            
+            for doc_id in tqdm(self.unique_doc_ids, desc="Chuẩn bị dữ liệu Jina-v3"):
+                full_text = corpus[doc_id]
+                # Context 8k cho phép chunk kích thước lớn 4000 ký tự mà không bị cắt cụt
+                chunks = legal_chunk_document(full_text, max_chunk_chars=4000, overlap=300, max_chunks=20)
+                for chunk in chunks:
+                    all_chunks.append(chunk)
+                    chunk_doc_ids.append(doc_id)
+            
+            self.chunk_doc_ids = chunk_doc_ids
+            
+            print(f"⚡ Đang mã hóa {len(all_chunks)} đoạn văn bản với Jina-v3 (task='retrieval.passage')...")
+            self.corpus_embeddings = self.model.encode(
+                all_chunks,
+                batch_size=32 if device == "cuda" else 8,
+                show_progress_bar=True,
+                normalize_embeddings=True,
+                task="retrieval.passage"
+            )
+            
+            with open(CACHE_JINA, "wb") as f:
+                pickle.dump({
+                    "unique_doc_ids": self.unique_doc_ids,
+                    "chunk_doc_ids": self.chunk_doc_ids,
+                    "embeddings": self.corpus_embeddings
+                }, f)
+            print(f"✅ Đã lưu Jina-v3 embeddings vào '{CACHE_JINA}'.")
+
+    def search(self, query, top_k=5):
+        query_embedding = self.model.encode(query, normalize_embeddings=True, task="retrieval.query")
+        chunk_scores = np.dot(self.corpus_embeddings, query_embedding)
+        
+        doc_max_scores = {}
+        for doc_id, score in zip(self.chunk_doc_ids, chunk_scores):
+            if doc_id not in doc_max_scores or score > doc_max_scores[doc_id]:
+                doc_max_scores[doc_id] = score
+                
+        sorted_docs = sorted(doc_max_scores.items(), key=lambda x: x[1], reverse=True)
+        return [doc_id for doc_id, _ in sorted_docs[:top_k]]
+
+
+# =====================================================================
+# ⚖️ THẾ HỆ MỚI: Qwen3 Vietnamese Legal Embedding (Chuyên gia Luật VN)
+# =====================================================================
+MODEL_QWEN_LEGAL = "CATI-AI/Qwen3-Embedding-0.6B-vietnamese-legal-v3"
+MODEL_QWEN_FALLBACK = "Qwen/Qwen3-Embedding-0.6B"
+
+_QWEN_CACHE_CANDIDATES = [
+    "corpus_embeddings_qwen3_legal_resolved.pkl",
+    "/kaggle/working/corpus_embeddings_qwen3_legal_resolved.pkl",
+    "/kaggle/input/notebooks/thurdayafternoon/legal-ir/corpus_embeddings_qwen3_legal_resolved.pkl",
+    "/kaggle/input/datasets/thurdayafternoon/pkl-cache/corpus_embeddings_qwen3_legal_resolved.pkl",
+]
+CACHE_QWEN = next((p for p in _QWEN_CACHE_CANDIDATES if os.path.exists(p) and os.path.getsize(p) > 1024*1024), _QWEN_CACHE_CANDIDATES[0])
+
+class QwenLegalEmbeddingSearcher:
+    """
+    Qwen3 Vietnamese Legal Embedding:
+    - Huấn luyện chuyên sâu trên dữ liệu Pháp luật Việt Nam.
+    - Context 4.096 - 8.192 tokens.
+    - Nhẹ (~0.6B tham số), tốc độ tính toán nhanh và tiết kiệm VRAM.
+    """
+    def __init__(self, corpus, model_name=MODEL_QWEN_LEGAL, use_cache=True):
+        self.unique_doc_ids = list(corpus.keys())
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        print(f"⚖️ Đang tải mô hình Qwen Legal '{model_name}' trên thiết bị: {device.upper()}...")
+        try:
+            self.model = SentenceTransformer(
+                model_name,
+                device=device,
+                trust_remote_code=True,
+                model_kwargs={"torch_dtype": torch.float16 if device == "cuda" else torch.float32}
+            )
+        except Exception as e:
+            print(f"⚠️ Không tải được {model_name}: {e}. Chuyển sang fallback '{MODEL_QWEN_FALLBACK}'...")
+            self.model = SentenceTransformer(
+                MODEL_QWEN_FALLBACK,
+                device=device,
+                trust_remote_code=True,
+                model_kwargs={"torch_dtype": torch.float16 if device == "cuda" else torch.float32}
+            )
+        self.model.max_seq_length = 4096
+
+        if use_cache and os.path.exists(CACHE_QWEN) and os.path.getsize(CACHE_QWEN) > 1024*1024:
+            print(f"⚡ Đang nạp Qwen Legal Embeddings từ '{CACHE_QWEN}'...")
+            with open(CACHE_QWEN, "rb") as f:
+                data = pickle.load(f)
+                self.unique_doc_ids = data["unique_doc_ids"]
+                self.chunk_doc_ids = data["chunk_doc_ids"]
+                self.corpus_embeddings = data["embeddings"]
+        else:
+            print("⚡ Đang chuẩn bị văn bản cho Qwen Legal (context 3000 ký tự)...")
+            all_chunks = []
+            chunk_doc_ids = []
+            
+            for doc_id in tqdm(self.unique_doc_ids, desc="Chuẩn bị dữ liệu Qwen Legal"):
+                full_text = corpus[doc_id]
+                chunks = legal_chunk_document(full_text, max_chunk_chars=3000, overlap=250, max_chunks=25)
+                for chunk in chunks:
+                    all_chunks.append(chunk)
+                    chunk_doc_ids.append(doc_id)
+            
+            self.chunk_doc_ids = chunk_doc_ids
+            
+            print(f"⚡ Đang mã hóa {len(all_chunks)} đoạn văn bản với Qwen Legal...")
+            self.corpus_embeddings = self.model.encode(
+                all_chunks,
+                batch_size=32 if device == "cuda" else 8,
+                show_progress_bar=True,
+                normalize_embeddings=True
+            )
+            
+            with open(CACHE_QWEN, "wb") as f:
+                pickle.dump({
+                    "unique_doc_ids": self.unique_doc_ids,
+                    "chunk_doc_ids": self.chunk_doc_ids,
+                    "embeddings": self.corpus_embeddings
+                }, f)
+            print(f"✅ Đã lưu Qwen Legal embeddings vào '{CACHE_QWEN}'.")
+
+    def search(self, query, top_k=5):
+        query_embedding = self.model.encode(query, normalize_embeddings=True)
+        chunk_scores = np.dot(self.corpus_embeddings, query_embedding)
+        
+        doc_max_scores = {}
+        for doc_id, score in zip(self.chunk_doc_ids, chunk_scores):
+            if doc_id not in doc_max_scores or score > doc_max_scores[doc_id]:
+                doc_max_scores[doc_id] = score
+                
+        sorted_docs = sorted(doc_max_scores.items(), key=lambda x: x[1], reverse=True)
+        return [doc_id for doc_id, _ in sorted_docs[:top_k]]

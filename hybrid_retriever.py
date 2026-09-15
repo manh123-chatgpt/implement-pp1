@@ -106,7 +106,10 @@ def extract_article_number(text):
     matches = re.findall(r'\bđiều\s+\d+\b', text)
     return list(set(matches))
 
-from dense_retriever import DenseSearcher, FineTunedDenseSearcher, E5LargeSearcher, legal_chunk_document
+from dense_retriever import (
+    DenseSearcher, FineTunedDenseSearcher, E5LargeSearcher, legal_chunk_document,
+    JinaEmbeddingSearcher, QwenLegalEmbeddingSearcher
+)
 from sentence_transformers import CrossEncoder
 
 def get_best_chunk_bm25(query, text, max_chunk_chars=800):
@@ -271,17 +274,22 @@ class CrossEncoderReranker:
 
 class HybridSearcher:
     def __init__(self, corpus, use_reranker=False, light_mode=True, reranker_model_path=None,
-                 bm25_type="okapi", bm25_k1=1.2, bm25_b=0.3):
+                 bm25_type="okapi", bm25_k1=1.2, bm25_b=0.3,
+                 use_jina=False, use_qwen=False):
         """
         use_reranker=False: Hệ thống Stage 1 (BM25 + Bi-Encoder + Rules).
         use_reranker=True: Kích hoạt Cross-Encoder PhoRanker.
         bm25_type: "okapi" hoặc "plus" (BM25Plus).
         bm25_k1/bm25_b: Tham số BM25 cho Grid Search.
+        use_jina=True: Kích hoạt mô hình SOTA jinaai/jina-embeddings-v3 (8.192 context).
+        use_qwen=True: Kích hoạt mô hình Qwen3 Vietnamese Legal Embedding.
         """
-        print(f"🚀 Khởi tạo HỆ THỐNG RETRIEVAL CHUẨN BTC UIT (Light Mode: {light_mode} | Reranker: {use_reranker})...")
+        print(f"🚀 Khởi tạo HỆ THỐNG RETRIEVAL CHUẨN BTC UIT (Light Mode: {light_mode} | Reranker: {use_reranker} | Jina-v3: {use_jina} | Qwen-Legal: {use_qwen})...")
         self.corpus = corpus
         self.doc_ids = list(corpus.keys())
         self.light_mode = light_mode
+        self.use_jina = use_jina
+        self.use_qwen = use_qwen
         
         # Bản đồ số hiệu văn bản tra cứu O(1)
         self.doc_law_numbers = {}
@@ -303,6 +311,10 @@ class HybridSearcher:
         else:
             self.dense_searcher = None
             self.e5_searcher = None
+
+        # Tích hợp Jina-v3 và Qwen-Legal (nếu được kích hoạt)
+        self.jina_searcher = JinaEmbeddingSearcher(corpus, use_cache=True) if use_jina else None
+        self.qwen_searcher = QwenLegalEmbeddingSearcher(corpus, use_cache=True) if use_qwen else None
 
         # Giai đoạn 2: Bộ tái xếp hạng (Cross-Encoder Re-ranker)
         if use_reranker:
@@ -360,6 +372,18 @@ class HybridSearcher:
 
         for rank, doc_id in enumerate(finetuned_top):
             scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 2.5
+
+        # Nếu kích hoạt Jina-v3 (8k context), kết hợp với trọng số cao
+        if self.jina_searcher:
+            jina_top = self.jina_searcher.search(query, top_k=candidate_k)
+            for rank, doc_id in enumerate(jina_top):
+                scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 3.0
+
+        # Nếu kích hoạt Qwen Legal, kết hợp với trọng số cao
+        if self.qwen_searcher:
+            qwen_top = self.qwen_searcher.search(query, top_k=candidate_k)
+            for rank, doc_id in enumerate(qwen_top):
+                scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 3.0
 
         # Nếu không ở chế độ light mode, kết hợp thêm BGE-M3 và E5
         if not self.light_mode and self.dense_searcher and self.e5_searcher:
