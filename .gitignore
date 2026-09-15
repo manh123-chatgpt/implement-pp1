@@ -6,3 +6,4 @@ uit-legal-finetuned-model.zip
 *.pkl
 embedding_tsne_visualization.png
 /LegalIR*/
+/uit-legal-ir-data/

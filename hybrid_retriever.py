@@ -10,6 +10,8 @@ from dense_retriever import DenseSearcher
 from evaluator import compute_metrics
 import string
 from rank_bm25 import BM25Okapi
+from transformers import logging as hf_logging
+hf_logging.set_verbosity_error()
 
 import re
 

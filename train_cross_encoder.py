@@ -11,8 +11,10 @@ from tqdm import tqdm
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
-    get_linear_schedule_with_warmup
+    get_linear_schedule_with_warmup,
+    logging as hf_logging
 )
+hf_logging.set_verbosity_error()
 from data_loader import load_corpus, load_train_data, WORK_DIR
 from dense_retriever import legal_chunk_document
 from rank_bm25 import BM25Okapi
