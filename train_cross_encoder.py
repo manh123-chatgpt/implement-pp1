@@ -90,6 +90,12 @@ def train_cross_encoder(epochs=None, lr=None, batch_size=None, output_dir=None):
     _bs = batch_size or BATCH_SIZE
     _output = output_dir or OUTPUT_DIR
     
+    # Xử lý an toàn nếu _output là symlink trỏ tới read-only input của Kaggle
+    if os.path.islink(_output):
+        print(f"⚠️ Thư mục '{_output}' là symlink tới read-only input. Gỡ bỏ symlink để ghi checkpoint mới.")
+        os.unlink(_output)
+    os.makedirs(_output, exist_ok=True)
+    
     print("=" * 70)
     print(f"🚀 BẮT ĐẦU HUẤN LUYỆN CROSS-ENCODER '{BASE_MODEL}' CHUẨN BTC UIT")
     print(f"⚙️ Epochs: {_epochs} | LR: {_lr} | Batch Size: {_bs} | Max Length: {MAX_LENGTH}")
@@ -276,12 +282,18 @@ def train_cross_encoder(epochs=None, lr=None, batch_size=None, output_dir=None):
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 print(f"💾 Lưu checkpoint tốt nhất vào: '{_output}'...")
+                if os.path.islink(_output):
+                    os.unlink(_output)
+                os.makedirs(_output, exist_ok=True)
                 model.save_pretrained(_output)
                 tokenizer.save_pretrained(_output)
 
     # Đảm bảo mô hình cuối cùng luôn được lưu
     if not os.path.exists(os.path.join(_output, "config.json")):
         print(f"💾 Lưu mô hình cuối cùng vào: '{_output}'...")
+        if os.path.islink(_output):
+            os.unlink(_output)
+        os.makedirs(_output, exist_ok=True)
         model.save_pretrained(_output)
         tokenizer.save_pretrained(_output)
 
