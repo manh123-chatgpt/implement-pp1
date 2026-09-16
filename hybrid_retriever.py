@@ -156,31 +156,45 @@ class CrossEncoderReranker:
         ]
         chosen_path = None
         for p in candidates:
-            if p and (os.path.exists(p) or p == "itdainb/PhoRanker"):
+            if p and (os.path.exists(p) or p in ["itdainb/PhoRanker", "infgrad/Prism-Qwen3.5-Reranker-2B", "Qwen/Qwen3-Reranker-0.6B", "BAAI/bge-reranker-v2-m3"]):
                 chosen_path = p
                 break
 
         if not chosen_path:
             chosen_path = "itdainb/PhoRanker"
 
-        self.is_finetuned = (chosen_path != "itdainb/PhoRanker")
-        print(f"🚀 KHỞI ĐỘNG CROSS-ENCODER RERANKER: '{chosen_path}' (Đã Fine-tuned: {self.is_finetuned})...")
+        self.chosen_path = chosen_path
+        self.is_finetuned = (chosen_path != "itdainb/PhoRanker" and not any(k in chosen_path for k in ["Qwen", "Prism", "bge"]))
+        self.is_llm_reranker = any(k in chosen_path.lower() for k in ["qwen", "prism", "bge", "jina"])
+        
+        # Thiết lập độ dài ngữ cảnh phù hợp: PhoRanker dùng 256, LLM Reranker dùng 1024-2048
+        self.max_length = 1024 if self.is_llm_reranker else 256
+        self.max_passage_chars = 3000 if self.is_llm_reranker else 600
+        
+        print(f"🚀 KHỞI ĐỘNG RERANKER: '{chosen_path}' (LLM Mode: {self.is_llm_reranker} | Context: {self.max_length})...")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         try:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
             self.model = CrossEncoder(
                 chosen_path,
                 device=device,
                 num_labels=1,
-                max_length=256
+                max_length=self.max_length,
+                trust_remote_code=True,
+                automodel_args={"torch_dtype": torch.float16 if device == "cuda" else torch.float32}
             )
             self.is_active = True
-            print(f"✅ Re-ranker sẵn sàng trên thiết bị: {device.upper()}")
+            print(f"✅ Re-ranker sẵn sàng trên thiết bị: {device.upper()} (FP16 Mode)")
         except Exception as e:
             print(f"⚠️ Thử nạp Cross-Encoder qua Transformers native: {e}")
             try:
                 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-                self.tokenizer = AutoTokenizer.from_pretrained(chosen_path)
-                self.hf_model = AutoModelForSequenceClassification.from_pretrained(chosen_path, num_labels=1)
+                self.tokenizer = AutoTokenizer.from_pretrained(chosen_path, trust_remote_code=True)
+                self.hf_model = AutoModelForSequenceClassification.from_pretrained(
+                    chosen_path,
+                    num_labels=1,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float16 if device == "cuda" else torch.float32
+                )
                 self.hf_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
                 self.hf_model.to(self.hf_device).eval()
                 self.is_active = True
@@ -190,23 +204,18 @@ class CrossEncoderReranker:
                 print(f"⚠️ Không thể nạp Cross-Encoder: {e2}. Hệ thống sẽ sử dụng điểm lọc Stage 1.")
                 self.is_active = False
 
-    def rerank(self, query, top_docs, candidate_scores=None, mega_boost_docs=None, exact_matched_docs=None, top_k=5, st1_weight=None):
+    def score_candidates(self, query, top_docs):
+        """Tính điểm thô từ Cross-Encoder cho danh sách ứng viên (chỉ chạy 1 lần duy nhất)"""
         if not self.is_active or not self.corpus or not top_docs:
-            return top_docs[:top_k]
+            return np.zeros(len(top_docs))
 
-        mega_boost_docs = mega_boost_docs or set()
-        exact_matched_docs = exact_matched_docs or set()
-
-        # Chuẩn bị cặp (query, doc_passage) cho từng ứng viên
-        # ⚠️ QUAN TRỌNG: Phải tách từ Pyvi cho CẢ query và passage
-        # để đồng bộ với lúc train_cross_encoder.py đã tokenize bằng Pyvi!
-        query_tok = self._tokenize(query) if self.has_pyvi else query
+        query_text = (self._tokenize(query) if (self.has_pyvi and not self.is_llm_reranker) else query)
         pairs = []
         for doc_id in top_docs:
             doc_text = self.corpus.get(str(doc_id), "")
-            passage = get_best_chunk_bm25(query, doc_text, max_chunk_chars=600)
-            passage_tok = self._tokenize(passage) if self.has_pyvi else passage
-            pairs.append([query_tok, passage_tok])
+            passage = get_best_chunk_bm25(query, doc_text, max_chunk_chars=self.max_passage_chars)
+            passage_text = (self._tokenize(passage) if (self.has_pyvi and not self.is_llm_reranker) else passage)
+            pairs.append([query_text, passage_text])
 
         try:
             batch_sz = 32 if torch.cuda.is_available() else 8
@@ -216,7 +225,7 @@ class CrossEncoderReranker:
                     for i in range(0, len(pairs), batch_sz):
                         b_pairs = pairs[i:i + batch_sz]
                         enc = self.tokenizer([p[0] for p in b_pairs], [p[1] for p in b_pairs],
-                                             padding=True, truncation="longest_first", max_length=256, return_tensors="pt")
+                                             padding=True, truncation="longest_first", max_length=self.max_length, return_tensors="pt")
                         enc = {k: v.to(self.hf_device) for k, v in enc.items()}
                         out = self.hf_model(**enc)
                         lgt = out.logits.squeeze(-1).cpu().numpy()
@@ -224,53 +233,71 @@ class CrossEncoderReranker:
                             scores.append(float(lgt))
                         else:
                             scores.extend(lgt.tolist())
-                scores = np.array(scores)
+                return np.array(scores)
             else:
-                scores = self.model.predict(pairs, batch_size=batch_sz, show_progress_bar=False)
-
-            # Score Fusion: Kết hợp điểm Stage 1 và Cross-Encoder
-            # Bảo tồn 100% độ chính xác cho các văn bản khớp chính xác số hiệu luật & điều luật
-            if candidate_scores:
-                c_vals = [candidate_scores.get(d, 0.0) for d in top_docs]
-                max_st1 = max(c_vals) if c_vals else 1.0
-                min_st1 = min(c_vals) if c_vals else 0.0
-                range_st1 = max(max_st1 - min_st1, 1e-6)
-            else:
-                range_st1 = 1.0
-
-            max_rr = float(np.max(scores)) if len(scores) > 0 else 1.0
-            min_rr = float(np.min(scores)) if len(scores) > 0 else 0.0
-            range_rr = max(max_rr - min_rr, 1e-6)
-
-            final_scores = {}
-            for i, doc_id in enumerate(top_docs):
-                rr_norm = (scores[i] - min_rr) / range_rr
-                if candidate_scores and doc_id in candidate_scores:
-                    st1_norm = (candidate_scores[doc_id] - min_st1) / range_st1
-                else:
-                    st1_norm = (len(top_docs) - i) / len(top_docs)
-
-                # Trọng số Fusion (có thể tùy chỉnh qua st1_weight)
-                if st1_weight is not None:
-                    w_st1 = st1_weight
-                elif self.is_finetuned:
-                    w_st1 = 0.75
-                else:
-                    w_st1 = 0.85
-                fused = w_st1 * st1_norm + (1.0 - w_st1) * rr_norm
-
-                if doc_id in mega_boost_docs:
-                    fused += 100.0
-                elif doc_id in exact_matched_docs:
-                    fused += 10.0
-
-                final_scores[doc_id] = fused
-
-            ranked_docs = sorted(top_docs, key=lambda d: final_scores[d], reverse=True)
-            return ranked_docs[:top_k]
+                return self.model.predict(pairs, batch_size=batch_sz, show_progress_bar=False)
         except Exception as e:
-            print(f"⚠️ Lỗi trong quá trình re-rank: {e}")
+            print(f"⚠️ Lỗi score_candidates: {e}")
+            return np.zeros(len(top_docs))
+
+    def fuse_and_rank(self, top_docs, rr_scores, candidate_scores=None, mega_boost_docs=None, exact_matched_docs=None, top_k=5, st1_weight=None, rerank_top_k=30):
+        """Kết hợp điểm (Score Fusion) cực nhanh trong RAM bằng đại số ma trận"""
+        if len(top_docs) == 0:
+            return []
+        
+        # Chỉ re-rank trong phạm vi rerank_top_k
+        eval_docs = top_docs[:rerank_top_k]
+        eval_rr_scores = rr_scores[:rerank_top_k] if len(rr_scores) >= len(eval_docs) else np.zeros(len(eval_docs))
+        
+        mega_boost_docs = mega_boost_docs or set()
+        exact_matched_docs = exact_matched_docs or set()
+
+        if candidate_scores:
+            c_vals = [candidate_scores.get(d, 0.0) for d in eval_docs]
+            max_st1 = max(c_vals) if c_vals else 1.0
+            min_st1 = min(c_vals) if c_vals else 0.0
+            range_st1 = max(max_st1 - min_st1, 1e-6)
+        else:
+            range_st1 = 1.0
+            min_st1 = 0.0
+
+        max_rr = float(np.max(eval_rr_scores)) if len(eval_rr_scores) > 0 else 1.0
+        min_rr = float(np.min(eval_rr_scores)) if len(eval_rr_scores) > 0 else 0.0
+        range_rr = max(max_rr - min_rr, 1e-6)
+
+        w_st1 = st1_weight if st1_weight is not None else (0.75 if self.is_finetuned else 0.85)
+
+        final_scores = {}
+        for i, doc_id in enumerate(eval_docs):
+            rr_norm = (eval_rr_scores[i] - min_rr) / range_rr
+            if candidate_scores and doc_id in candidate_scores:
+                st1_norm = (candidate_scores[doc_id] - min_st1) / range_st1
+            else:
+                st1_norm = (len(eval_docs) - i) / len(eval_docs)
+
+            fused = w_st1 * st1_norm + (1.0 - w_st1) * rr_norm
+
+            if doc_id in mega_boost_docs:
+                fused += 100.0
+            elif doc_id in exact_matched_docs:
+                fused += 10.0
+
+            final_scores[doc_id] = fused
+
+        # Thêm các ứng viên ngoài rerank_top_k với điểm thấp hơn
+        for i, doc_id in enumerate(top_docs[rerank_top_k:]):
+            final_scores[doc_id] = -100.0 - i
+
+        ranked_docs = sorted(top_docs, key=lambda d: final_scores.get(d, -999.0), reverse=True)
+        return ranked_docs[:top_k]
+
+    def rerank(self, query, top_docs, candidate_scores=None, mega_boost_docs=None, exact_matched_docs=None, top_k=5, st1_weight=None, rerank_top_k=30):
+        if not self.is_active or not self.corpus or not top_docs:
             return top_docs[:top_k]
+
+        eval_docs = top_docs[:rerank_top_k]
+        rr_scores = self.score_candidates(query, eval_docs)
+        return self.fuse_and_rank(top_docs, rr_scores, candidate_scores, mega_boost_docs, exact_matched_docs, top_k, st1_weight, rerank_top_k)
 
 class HybridSearcher:
     def __init__(self, corpus, use_reranker=False, light_mode=True, reranker_model_path=None,
@@ -415,10 +442,104 @@ class HybridSearcher:
                 mega_boost_docs=mega_boost_docs,
                 exact_matched_docs=exact_matched_docs,
                 top_k=top_k,
-                st1_weight=st1_weight
+                st1_weight=st1_weight,
+                rerank_top_k=rerank_top_k
             )
         
         return top_candidates[:top_k]
+
+    def get_query_candidates_and_rerank_scores(self, query, candidate_k=90, max_rerank_k=50):
+        """
+        Dùng cho Grid Search siêu tốc:
+        Thu thập ứng viên Stage 1 và chấm điểm Reranker đúng 1 LẦN DUY NHẤT.
+        Trả về dictionary dữ liệu sẵn sàng cho in-memory vector fusion.
+        """
+        query_laws = extract_law_numbers(query)
+        query_articles = extract_article_number(query)
+        
+        exact_matched_docs = set()
+        mega_boost_docs = set()
+        
+        for doc_id, doc_text_lower in self.corpus_lower.items():
+            laws_in_doc = self.doc_law_numbers.get(doc_id, [])
+            has_law = any(ql in laws_in_doc for ql in query_laws)
+            has_article = False
+            if has_law and query_articles:
+                for qa in query_articles:
+                    if qa in doc_text_lower:
+                        has_article = True
+                        break
+                
+            if has_law and has_article:
+                mega_boost_docs.add(doc_id)
+            elif has_law:
+                exact_matched_docs.add(doc_id)
+
+        expanded_query = expand_legal_query(query)
+
+        bm25_top = self.bm25_searcher.search(expanded_query, top_k=candidate_k)
+        finetuned_top = self.finetuned_searcher.search(expanded_query, top_k=candidate_k)
+
+        scores = {}
+        rrf_k = 10
+        for rank, doc_id in enumerate(bm25_top):
+            scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 1.5
+
+        for rank, doc_id in enumerate(finetuned_top):
+            scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 2.5
+
+        if self.jina_searcher:
+            jina_top = self.jina_searcher.search(query, top_k=candidate_k)
+            for rank, doc_id in enumerate(jina_top):
+                scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 3.0
+
+        if self.qwen_searcher:
+            qwen_top = self.qwen_searcher.search(query, top_k=candidate_k)
+            for rank, doc_id in enumerate(qwen_top):
+                scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 3.0
+
+        if not self.light_mode and self.dense_searcher and self.e5_searcher:
+            dense_top = self.dense_searcher.search(expanded_query, top_k=candidate_k)
+            e5_top = self.e5_searcher.search(expanded_query, top_k=candidate_k)
+            for rank, doc_id in enumerate(dense_top):
+                scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 0.5
+            for rank, doc_id in enumerate(e5_top):
+                scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 1.0
+
+        for doc_id in exact_matched_docs:
+            scores[doc_id] = scores.get(doc_id, 0.0) + 5.0
+            
+        for doc_id in mega_boost_docs:
+            scores[doc_id] = scores.get(doc_id, 0.0) + 7.0
+
+        sorted_docs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        top_candidates = [doc_id for doc_id, _ in sorted_docs[:candidate_k]]
+
+        eval_docs = top_candidates[:max_rerank_k]
+        rr_scores = self.reranker.score_candidates(query, eval_docs) if (self.reranker and self.reranker.is_active) else np.zeros(len(eval_docs))
+
+        return {
+            "top_candidates": top_candidates,
+            "rr_scores": rr_scores,
+            "candidate_scores": scores,
+            "mega_boost_docs": mega_boost_docs,
+            "exact_matched_docs": exact_matched_docs
+        }
+
+    def fuse_from_cached_scores(self, cached_item, top_k=5, rerank_top_k=30, st1_weight=0.75):
+        """Kết hợp điểm từ dữ liệu đã cache trong RAM - cực nhanh (0.0001s / câu)"""
+        if self.reranker and self.reranker.is_active:
+            return self.reranker.fuse_and_rank(
+                top_docs=cached_item["top_candidates"],
+                rr_scores=cached_item["rr_scores"],
+                candidate_scores=cached_item["candidate_scores"],
+                mega_boost_docs=cached_item["mega_boost_docs"],
+                exact_matched_docs=cached_item["exact_matched_docs"],
+                top_k=top_k,
+                st1_weight=st1_weight,
+                rerank_top_k=rerank_top_k
+            )
+        return cached_item["top_candidates"][:top_k]
 
 def create_submission(predictions, output_json="submission.json", output_zip="submission.zip"):
     """

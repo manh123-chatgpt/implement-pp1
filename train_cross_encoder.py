@@ -227,6 +227,8 @@ def train_cross_encoder(epochs=None, lr=None, batch_size=None, output_dir=None):
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
 
     best_val_loss = float('inf')
+    if os.path.islink(_output):
+        os.unlink(_output)
     os.makedirs(_output, exist_ok=True)
 
     print(f"🔥 Bắt đầu huấn luyện {_epochs} Epochs với PyTorch Native & AMP (Mixed Precision)...")
