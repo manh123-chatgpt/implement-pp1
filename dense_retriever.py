@@ -668,3 +668,96 @@ class QwenLegalEmbeddingSearcher:
                 
         sorted_docs = sorted(doc_max_scores.items(), key=lambda x: x[1], reverse=True)
         return [doc_id for doc_id, _ in sorted_docs[:top_k]]
+
+
+# =====================================================================
+# 👑 TIER S+ SOTA: Qwen3-Embedding-4B (4 Tỷ tham số, 32K context)
+# =====================================================================
+MODEL_QWEN_4B = "Qwen/Qwen3-Embedding-4B"
+_QWEN4B_CACHE_CANDIDATES = [
+    "corpus_embeddings_qwen3_4b_resolved.pkl",
+    "/kaggle/working/corpus_embeddings_qwen3_4b_resolved.pkl",
+    "/kaggle/input/notebooks/thurdayafternoon/legal-ir/corpus_embeddings_qwen3_4b_resolved.pkl",
+    "/kaggle/input/datasets/thurdayafternoon/pkl-cache/corpus_embeddings_qwen3_4b_resolved.pkl",
+]
+CACHE_QWEN4B = next((p for p in _QWEN4B_CACHE_CANDIDATES if os.path.exists(p) and os.path.getsize(p) > 1024*1024), _QWEN4B_CACHE_CANDIDATES[0])
+
+class Qwen4BEmbeddingSearcher:
+    """
+    Qwen3-Embedding-4B:
+    - Mô hình Embedding 4 TỶ tham số mạnh nhất trong danh sách phê duyệt của BTC UIT.
+    - Context cực lớn 8.192 - 32.768 tokens (không bao giờ bị tràn ngữ cảnh điều luật).
+    - Tối ưu FP16 trên GPU T4 (~8GB VRAM), tự động fallback sang Qwen-0.6B nếu thiếu VRAM.
+    """
+    def __init__(self, corpus, model_name=MODEL_QWEN_4B, use_cache=True):
+        self.unique_doc_ids = list(corpus.keys())
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        print(f"👑 Đang tải siêu mô hình Tier S+ '{model_name}' trên thiết bị: {device.upper()} (FP16 Mode)...")
+        try:
+            self.model = SentenceTransformer(
+                model_name,
+                device=device,
+                trust_remote_code=True,
+                model_kwargs={"torch_dtype": torch.float16 if device == "cuda" else torch.float32}
+            )
+        except Exception as e:
+            print(f"⚠️ Không nạp được {model_name} ({e}). Chuyển sang fallback 'CATI-AI/Qwen3-Embedding-0.6B-vietnamese-legal-v3'...")
+            self.model = SentenceTransformer(
+                "CATI-AI/Qwen3-Embedding-0.6B-vietnamese-legal-v3",
+                device=device,
+                trust_remote_code=True,
+                model_kwargs={"torch_dtype": torch.float16 if device == "cuda" else torch.float32}
+            )
+        self.model.max_seq_length = 4096
+
+        if use_cache and os.path.exists(CACHE_QWEN4B) and os.path.getsize(CACHE_QWEN4B) > 1024*1024:
+            print(f"⚡ Đang nạp Qwen3-4B Embeddings từ '{CACHE_QWEN4B}'...")
+            with open(CACHE_QWEN4B, "rb") as f:
+                data = pickle.load(f)
+                self.unique_doc_ids = data["unique_doc_ids"]
+                self.chunk_doc_ids = data["chunk_doc_ids"]
+                self.corpus_embeddings = data["embeddings"]
+            print(f"✅ Nạp thành công cache Qwen3-4B ({len(self.corpus_embeddings)} vectors).")
+        else:
+            print("⚡ Đang chuẩn bị văn bản cho Qwen3-4B (hỗ trợ context dài 4000 ký tự)...")
+            all_chunks = []
+            chunk_doc_ids = []
+            
+            for doc_id in tqdm(self.unique_doc_ids, desc="Chuẩn bị dữ liệu Qwen3-4B"):
+                full_text = corpus[doc_id]
+                chunks = legal_chunk_document(full_text, max_chunk_chars=4000, overlap=300, max_chunks=20)
+                for chunk in chunks:
+                    all_chunks.append(chunk)
+                    chunk_doc_ids.append(doc_id)
+            
+            self.chunk_doc_ids = chunk_doc_ids
+            
+            print(f"⚡ Đang mã hóa {len(all_chunks)} đoạn văn bản với Qwen3-4B (FP16)...")
+            self.corpus_embeddings = self.model.encode(
+                all_chunks,
+                batch_size=16 if device == "cuda" else 4,
+                show_progress_bar=True,
+                normalize_embeddings=True
+            )
+            
+            with open(CACHE_QWEN4B, "wb") as f:
+                pickle.dump({
+                    "unique_doc_ids": self.unique_doc_ids,
+                    "chunk_doc_ids": self.chunk_doc_ids,
+                    "embeddings": self.corpus_embeddings
+                }, f)
+            print(f"✅ Đã lưu Qwen3-4B embeddings vào '{CACHE_QWEN4B}'.")
+
+    def search(self, query, top_k=5):
+        query_embedding = self.model.encode(query, normalize_embeddings=True)
+        chunk_scores = np.dot(self.corpus_embeddings, query_embedding)
+        
+        doc_max_scores = {}
+        for doc_id, score in zip(self.chunk_doc_ids, chunk_scores):
+            if doc_id not in doc_max_scores or score > doc_max_scores[doc_id]:
+                doc_max_scores[doc_id] = score
+                
+        sorted_docs = sorted(doc_max_scores.items(), key=lambda x: x[1], reverse=True)
+        return [doc_id for doc_id, _ in sorted_docs[:top_k]]
+

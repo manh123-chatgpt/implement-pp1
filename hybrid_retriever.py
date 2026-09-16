@@ -108,7 +108,7 @@ def extract_article_number(text):
 
 from dense_retriever import (
     DenseSearcher, FineTunedDenseSearcher, E5LargeSearcher, legal_chunk_document,
-    JinaEmbeddingSearcher, QwenLegalEmbeddingSearcher
+    JinaEmbeddingSearcher, QwenLegalEmbeddingSearcher, Qwen4BEmbeddingSearcher
 )
 from sentence_transformers import CrossEncoder
 
@@ -144,7 +144,7 @@ class CrossEncoderReranker:
             self._tokenize = lambda x: x
             print("ℹ️ CrossEncoder Reranker: Pyvi không khả dụng, sử dụng văn bản gốc.")
 
-        # Tự động dò đường dẫn model đã fine-tune, hoặc tải PhoRanker gốc
+        # Tự động dò đường dẫn model đã fine-tune, hoặc tải PhoRanker gốc / Qwen3-Reranker-4B
         candidates = [
             model_path,
             os.path.join(WORK_DIR, "fine_tuned_vietnamese_cross_encoder"),
@@ -156,7 +156,7 @@ class CrossEncoderReranker:
         ]
         chosen_path = None
         for p in candidates:
-            if p and (os.path.exists(p) or p in ["itdainb/PhoRanker", "infgrad/Prism-Qwen3.5-Reranker-2B", "Qwen/Qwen3-Reranker-0.6B", "BAAI/bge-reranker-v2-m3"]):
+            if p and (os.path.exists(p) or "/" in p or p.startswith("Qwen") or p.startswith("bge") or p.startswith("infgrad")):
                 chosen_path = p
                 break
 
@@ -164,14 +164,15 @@ class CrossEncoderReranker:
             chosen_path = "itdainb/PhoRanker"
 
         self.chosen_path = chosen_path
-        self.is_finetuned = (chosen_path != "itdainb/PhoRanker" and not any(k in chosen_path for k in ["Qwen", "Prism", "bge"]))
-        self.is_llm_reranker = any(k in chosen_path.lower() for k in ["qwen", "prism", "bge", "jina"])
+        self.is_finetuned = (chosen_path != "itdainb/PhoRanker" and not any(k in chosen_path for k in ["Qwen", "Prism", "bge", "jina", "gemma"]))
+        self.is_llm_reranker = any(k in chosen_path.lower() for k in ["qwen", "prism", "bge", "jina", "gemma"])
+        self.is_4b = "4b" in chosen_path.lower()
         
-        # Thiết lập độ dài ngữ cảnh phù hợp: PhoRanker dùng 256, LLM Reranker dùng 1024-2048
-        self.max_length = 1024 if self.is_llm_reranker else 256
-        self.max_passage_chars = 3000 if self.is_llm_reranker else 600
+        # Thiết lập độ dài ngữ cảnh phù hợp: PhoRanker dùng 256, LLM Reranker dùng 2048
+        self.max_length = 2048 if self.is_llm_reranker else 256
+        self.max_passage_chars = 3500 if self.is_llm_reranker else 600
         
-        print(f"🚀 KHỞI ĐỘNG RERANKER: '{chosen_path}' (LLM Mode: {self.is_llm_reranker} | Context: {self.max_length})...")
+        print(f"🚀 KHỞI ĐỘNG RERANKER: '{chosen_path}' (LLM Mode: {self.is_llm_reranker} | 4B Model: {self.is_4b} | Context: {self.max_length})...")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         try:
             self.model = CrossEncoder(
@@ -218,7 +219,7 @@ class CrossEncoderReranker:
             pairs.append([query_text, passage_text])
 
         try:
-            batch_sz = 32 if torch.cuda.is_available() else 8
+            batch_sz = (8 if self.is_4b else 32) if torch.cuda.is_available() else 4
             if self.use_hf:
                 scores = []
                 with torch.no_grad():
@@ -302,21 +303,23 @@ class CrossEncoderReranker:
 class HybridSearcher:
     def __init__(self, corpus, use_reranker=False, light_mode=True, reranker_model_path=None,
                  bm25_type="okapi", bm25_k1=1.2, bm25_b=0.3,
-                 use_jina=False, use_qwen=False):
+                 use_jina=False, use_qwen=False, use_qwen4b=False):
         """
         use_reranker=False: Hệ thống Stage 1 (BM25 + Bi-Encoder + Rules).
-        use_reranker=True: Kích hoạt Cross-Encoder PhoRanker.
+        use_reranker=True: Kích hoạt Cross-Encoder (PhoRanker hoặc Qwen3-Reranker-4B).
         bm25_type: "okapi" hoặc "plus" (BM25Plus).
         bm25_k1/bm25_b: Tham số BM25 cho Grid Search.
         use_jina=True: Kích hoạt mô hình SOTA jinaai/jina-embeddings-v3 (8.192 context).
         use_qwen=True: Kích hoạt mô hình Qwen3 Vietnamese Legal Embedding.
+        use_qwen4b=True: Kích hoạt siêu mô hình 4B Qwen/Qwen3-Embedding-4B.
         """
-        print(f"🚀 Khởi tạo HỆ THỐNG RETRIEVAL CHUẨN BTC UIT (Light Mode: {light_mode} | Reranker: {use_reranker} | Jina-v3: {use_jina} | Qwen-Legal: {use_qwen})...")
+        print(f"🚀 Khởi tạo HỆ THỐNG RETRIEVAL CHUẨN BTC UIT (Light Mode: {light_mode} | Reranker: {use_reranker} | Jina-v3: {use_jina} | Qwen-Legal: {use_qwen} | Qwen3-4B: {use_qwen4b})...")
         self.corpus = corpus
         self.doc_ids = list(corpus.keys())
         self.light_mode = light_mode
         self.use_jina = use_jina
         self.use_qwen = use_qwen
+        self.use_qwen4b = use_qwen4b
         
         # Bản đồ số hiệu văn bản tra cứu O(1)
         self.doc_law_numbers = {}
@@ -339,9 +342,10 @@ class HybridSearcher:
             self.dense_searcher = None
             self.e5_searcher = None
 
-        # Tích hợp Jina-v3 và Qwen-Legal (nếu được kích hoạt)
+        # Tích hợp Jina-v3, Qwen-Legal, Qwen3-4B (nếu được kích hoạt)
         self.jina_searcher = JinaEmbeddingSearcher(corpus, use_cache=True) if use_jina else None
         self.qwen_searcher = QwenLegalEmbeddingSearcher(corpus, use_cache=True) if use_qwen else None
+        self.qwen4b_searcher = Qwen4BEmbeddingSearcher(corpus, use_cache=True) if use_qwen4b else None
 
         # Giai đoạn 2: Bộ tái xếp hạng (Cross-Encoder Re-ranker)
         if use_reranker:
@@ -411,6 +415,12 @@ class HybridSearcher:
             qwen_top = self.qwen_searcher.search(query, top_k=candidate_k)
             for rank, doc_id in enumerate(qwen_top):
                 scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 3.0
+
+        # Nếu kích hoạt Qwen3-4B (Tier S+), kết hợp với trọng số cao nhất (x3.5)
+        if self.qwen4b_searcher:
+            qwen4b_top = self.qwen4b_searcher.search(query, top_k=candidate_k)
+            for rank, doc_id in enumerate(qwen4b_top):
+                scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 3.5
 
         # Nếu không ở chế độ light mode, kết hợp thêm BGE-M3 và E5
         if not self.light_mode and self.dense_searcher and self.e5_searcher:
@@ -497,6 +507,11 @@ class HybridSearcher:
             qwen_top = self.qwen_searcher.search(query, top_k=candidate_k)
             for rank, doc_id in enumerate(qwen_top):
                 scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 3.0
+
+        if self.qwen4b_searcher:
+            qwen4b_top = self.qwen4b_searcher.search(query, top_k=candidate_k)
+            for rank, doc_id in enumerate(qwen4b_top):
+                scores[doc_id] = scores.get(doc_id, 0.0) + (1.0 / (rrf_k + rank + 1)) * 3.5
 
         if not self.light_mode and self.dense_searcher and self.e5_searcher:
             dense_top = self.dense_searcher.search(expanded_query, top_k=candidate_k)
