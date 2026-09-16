@@ -16,7 +16,12 @@ if os.path.exists("/kaggle/input"):
     print(f"📂 Kaggle DATA_DIR: {DATA_DIR}")
 else:
     # LOCAL
-    DATA_DIR = "LegalIR - Public Test-20260824T120008Z-1-001/LegalIR - Public Test"
+    _local_candidates = [
+        "uit-legal-ir-data",
+        "LegalIR - Public Test-20260824T120008Z-1-001/LegalIR - Public Test",
+        "."
+    ]
+    DATA_DIR = next((p for p in _local_candidates if os.path.exists(os.path.join(p, "train.json"))), _local_candidates[0])
     WORK_DIR = "."
 
 CORPUS_DIR = os.path.join(DATA_DIR, "selected-contexts")
