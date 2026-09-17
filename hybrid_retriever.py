@@ -168,9 +168,9 @@ class CrossEncoderReranker:
         self.is_llm_reranker = any(k in chosen_path.lower() for k in ["qwen", "prism", "bge", "jina", "gemma"])
         self.is_4b = "4b" in chosen_path.lower()
         
-        # Thiết lập độ dài ngữ cảnh phù hợp: PhoRanker dùng 256, LLM Reranker dùng 2048
-        self.max_length = 2048 if self.is_llm_reranker else 256
-        self.max_passage_chars = 3500 if self.is_llm_reranker else 600
+        # Thiết lập độ dài ngữ cảnh phù hợp: PhoRanker dùng 256, LLM Reranker dùng 1536
+        self.max_length = 1536 if self.is_llm_reranker else 256
+        self.max_passage_chars = 2500 if self.is_llm_reranker else 600
         
         print(f"🚀 KHỞI ĐỘNG RERANKER: '{chosen_path}' (LLM Mode: {self.is_llm_reranker} | 4B Model: {self.is_4b} | Context: {self.max_length})...")
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -218,11 +218,13 @@ class CrossEncoderReranker:
             passage_text = (self._tokenize(passage) if (self.has_pyvi and not self.is_llm_reranker) else passage)
             pairs.append([query_text, passage_text])
 
+        # ⚡ Tối ưu VRAM: Đối với mô hình 4B, dùng batch_size=2 để tránh OOM trên Kaggle T4 (15GB VRAM)
+        batch_sz = (2 if self.is_4b else 16) if torch.cuda.is_available() else 4
+
         try:
-            batch_sz = (8 if self.is_4b else 32) if torch.cuda.is_available() else 4
             if self.use_hf:
                 scores = []
-                with torch.no_grad():
+                with torch.inference_mode():
                     for i in range(0, len(pairs), batch_sz):
                         b_pairs = pairs[i:i + batch_sz]
                         enc = self.tokenizer([p[0] for p in b_pairs], [p[1] for p in b_pairs],
@@ -234,11 +236,28 @@ class CrossEncoderReranker:
                             scores.append(float(lgt))
                         else:
                             scores.extend(lgt.tolist())
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 return np.array(scores)
             else:
-                return self.model.predict(pairs, batch_size=batch_sz, show_progress_bar=False)
+                with torch.inference_mode():
+                    scores = self.model.predict(pairs, batch_size=batch_sz, show_progress_bar=False)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                return scores
         except Exception as e:
-            print(f"⚠️ Lỗi score_candidates: {e}")
+            if "out of memory" in str(e).lower() and torch.cuda.is_available():
+                print(f"⚠️ CUDA OOM khi chấm điểm! Đang dọn VRAM và thử lại an toàn với batch_size=1...")
+                torch.cuda.empty_cache()
+                try:
+                    with torch.inference_mode():
+                        scores = self.model.predict(pairs, batch_size=1, show_progress_bar=False)
+                    torch.cuda.empty_cache()
+                    return scores
+                except Exception as e2:
+                    print(f"⚠️ Vẫn lỗi sau retry batch_size=1: {e2}")
+            else:
+                print(f"⚠️ Lỗi score_candidates: {e}")
             return np.zeros(len(top_docs))
 
     def fuse_and_rank(self, top_docs, rr_scores, candidate_scores=None, mega_boost_docs=None, exact_matched_docs=None, top_k=5, st1_weight=None, rerank_top_k=30):
