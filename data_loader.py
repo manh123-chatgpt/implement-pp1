@@ -178,9 +178,23 @@ def load_corpus(corpus_dir=CORPUS_DIR, force_original=False, clean_noise=True):
     print(f"Đã nạp thành công {len(corpus)} văn bản vào Corpus (với Title 3x Boosting & Cleaned).")
     return corpus
 
-def load_train_data(train_path=os.path.join(DATA_DIR, "train.json")):
+# Danh sách các câu hỏi nhiễu / mâu thuẫn mốc thời gian cần loại khỏi tập Train
+EXCLUDED_TRAIN_QIDS = {
+    "5726": "Năm 2023, người lao động có bao nhiêu ngày nghỉ lễ, tết? (Mâu thuẫn mốc thời gian 2023 vs Bộ luật Lao động 2019)",
+}
+
+def load_train_data(train_path=os.path.join(DATA_DIR, "train.json"), filter_noisy=True):
     with open(train_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    
+    if filter_noisy:
+        original_len = len(data)
+        filtered_data = {k: v for k, v in data.items() if str(k) not in EXCLUDED_TRAIN_QIDS}
+        removed = original_len - len(filtered_data)
+        if removed > 0:
+            print(f"🧹 Đã tự động loại bỏ {removed} câu hỏi nhiễu khỏi tập Train (ví dụ: QID {list(EXCLUDED_TRAIN_QIDS.keys())}).")
+        return filtered_data
+    return data
 
 def load_test_data(test_path=os.path.join(DATA_DIR, "public-official.json")):
     with open(test_path, "r", encoding="utf-8") as f:
@@ -191,7 +205,7 @@ if __name__ == "__main__":
     train_data = load_train_data()
     test_data = load_test_data()
 
-    print(f"Số lượng câu hỏi Train: {len(train_data)}")
+    print(f"Số lượng câu hỏi Train (sau lọc): {len(train_data)}")
     print(f"Số lượng câu hỏi Test: {len(test_data)}")
     
     sample_id = next(iter(corpus))
