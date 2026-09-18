@@ -761,3 +761,7 @@ class Qwen4BEmbeddingSearcher:
         sorted_docs = sorted(doc_max_scores.items(), key=lambda x: x[1], reverse=True)
         return [doc_id for doc_id, _ in sorted_docs[:top_k]]
 
+# Alias exports for notebook compatibility
+BGEEmbeddingSearcher = DenseSearcher
+E5EmbeddingSearcher = E5LargeSearcher
+
