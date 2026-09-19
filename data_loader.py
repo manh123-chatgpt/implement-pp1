@@ -196,9 +196,56 @@ def load_train_data(train_path=os.path.join(DATA_DIR, "train.json"), filter_nois
         return filtered_data
     return data
 
-def load_test_data(test_path=os.path.join(DATA_DIR, "public-official.json")):
-    with open(test_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def load_test_data(test_path=None):
+    """
+    Nạp dữ liệu Test. Tự động ưu tiên:
+    1. Đường dẫn test_path truyền vào (nếu có).
+    2. Tập Private Test 'private-official.json' nếu tìm thấy trong thư mục hoặc input dataset.
+    3. Mặc định: 'public-official.json'.
+    """
+    if test_path and os.path.exists(test_path) and os.path.getsize(test_path) > 1024:
+        with open(test_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        print(f"📊 Đã nạp tập Test từ: {test_path} ({len(data)} câu hỏi)")
+        return data
+
+    # 1. Dò tìm private-official.json trong các vị trí tiềm năng
+    candidates_private = [
+        "private-official.json",
+        os.path.join(DATA_DIR, "private-official.json"),
+        os.path.join(WORK_DIR, "private-official.json"),
+    ]
+    # Dò tìm trong các thư mục Kaggle input
+    for root_dir in ["/kaggle/input", "/kaggle/working"]:
+        if os.path.exists(root_dir):
+            for r, _, files in os.walk(root_dir):
+                if "private-official.json" in files:
+                    p = os.path.join(r, "private-official.json")
+                    if os.path.getsize(p) > 1024:
+                        candidates_private.insert(0, p)
+                        break
+
+    for p in candidates_private:
+        if os.path.exists(p) and os.path.getsize(p) > 1024:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            print(f"🔥 [CHÍNH THỨC] ĐÃ NẠP PRIVATE TEST TỪ: '{p}' ({len(data)} CÂU HỎI CHẤM ĐIỂM CUỐI)! 🎯")
+            return data
+
+    # 2. Fallback về public-official.json nếu chưa có Private Test
+    candidates_public = [
+        os.path.join(DATA_DIR, "public-official.json"),
+        "public-official.json",
+        os.path.join(WORK_DIR, "public-official.json"),
+    ]
+    for p in candidates_public:
+        if os.path.exists(p) and os.path.getsize(p) > 1024:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            print(f"ℹ️ Đang sử dụng Public Test: '{p}' ({len(data)} câu hỏi)")
+            return data
+
+    raise FileNotFoundError("❌ Không tìm thấy file test (private-official.json hoặc public-official.json)!")
 
 if __name__ == "__main__":
     corpus = load_corpus()
